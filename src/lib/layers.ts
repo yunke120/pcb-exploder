@@ -11,6 +11,8 @@ export type LayerKind =
   | 'topPaste'
   | 'bottomPaste'
   | 'keepout'
+  | 'mechanical'
+  | 'component'
   | 'outline'
   | 'drill'
   | 'unknown'
@@ -36,6 +38,8 @@ const COLOR: Record<LayerKind, string> = {
   topPaste: '#cfcfcf',
   bottomPaste: '#bcbcbc',
   keepout: '#e8556a',
+  mechanical: '#8c9aa6',
+  component: '#7fd1e0',
   outline: '#ffffff',
   drill: '#8aa0b4',
   unknown: '#9aa7b4',
@@ -43,6 +47,11 @@ const COLOR: Record<LayerKind, string> = {
 
 function innerName(n: number) {
   return `内层铜箔 L${n}`
+}
+
+/** 取得某图层类型的标准配色（ODB++ 等外部解析器复用） */
+export function layerColor(kind: LayerKind): string {
+  return COLOR[kind] ?? '#9aa7b4'
 }
 
 /**

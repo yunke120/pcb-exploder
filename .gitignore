@@ -1,8 +1,9 @@
-# ---------- PCB 样例数据：不上传 Gerber 文件 ----------
+# ---------- PCB 样例数据：不上传 Gerber / ODB++ 样例 ----------
 *.gbr
 *.ger
 gerber_file/
 gerber_file.zip
+odb/
 
 # ---------- 依赖与构建产物 ----------
 node_modules/
