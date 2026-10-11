@@ -1,0 +1,18 @@
+# ---------- PCB 样例数据：不上传 Gerber 文件 ----------
+*.gbr
+*.ger
+gerber_file/
+gerber_file.zip
+
+# ---------- 依赖与构建产物 ----------
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+
+# ---------- 系统 / 编辑器 ----------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.local
