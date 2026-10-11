@@ -222,10 +222,11 @@ function parseFeatures(text: string): ParsedFeatures {
       continue
     }
     if (code === 'S') {
-      // 表面（填充多边形）：S polarity [window] 随后 OB/OS.../OE (可选 OH.../OE) / SE
+      // 表面（填充多边形）：S polarity [window] 随后逐条轮廓，每条以 OB 起始、OS 续点、OE 结束；
+      // 同一条 S 内第一个 OB 为外轮廓，后续 OB（铜箔灌铜中的焊盘/过孔隔离环等）为内孔。
+      // 每条轮廓都是独立多边形，渲染时以 evenodd 规则填充（外填内空）。
       const pol = parts[1] === 'N' ? 'N' : 'P'
-      const outer: number[][] = []
-      const holes: number[][][] = []
+      const contours: number[][][] = []
       let cur: number[][] | null = null
       i++
       while (i < n) {
@@ -237,12 +238,14 @@ function parseFeatures(text: string): ParsedFeatures {
           i++
           continue
         }
-        if (l2.startsWith('OB')) {
+        if (l2.startsWith('OB') || l2.startsWith('OH')) {
+          // 开始一条新轮廓（外轮廓或内孔）；OH 也为部分导出器的孔内轮廓起点
           const pp = l2.split(/\s+/)
           const x = parseFloat(pp[1]) * INCH_TO_MM
           const y = parseFloat(pp[2]) * INCH_TO_MM
-          outer.push([x, y])
-          cur = outer
+          const c: number[][] = [[x, y]]
+          contours.push(c)
+          cur = c
           i++
           continue
         }
@@ -251,16 +254,6 @@ function parseFeatures(text: string): ParsedFeatures {
           const x = parseFloat(pp[1]) * INCH_TO_MM
           const y = parseFloat(pp[2]) * INCH_TO_MM
           if (cur) cur.push([x, y])
-          i++
-          continue
-        }
-        if (l2.startsWith('OH')) {
-          const pp = l2.split(/\s+/)
-          const x = parseFloat(pp[1]) * INCH_TO_MM
-          const y = parseFloat(pp[2]) * INCH_TO_MM
-          const hole: number[][] = [[x, y]]
-          holes.push(hole)
-          cur = hole
           i++
           continue
         }
@@ -275,12 +268,11 @@ function parseFeatures(text: string): ParsedFeatures {
         }
         i++
       }
-      if (outer.length >= 3) {
-        const f: OdbFeature = { kind: 'surface', symbol: 0, polarity: pol, poly: outer }
-        if (holes.length) f.holes = holes
+      if (contours.length > 0 && contours[0].length >= 3) {
+        const f: OdbFeature = { kind: 'surface', symbol: 0, polarity: pol, poly: contours[0] }
+        if (contours.length > 1) f.holes = contours.slice(1)
         features.push(f)
-        for (const p of outer) touch(p[0], p[1])
-        for (const h of holes) for (const p of h) touch(p[0], p[1])
+        for (const c of contours) for (const p of c) touch(p[0], p[1])
       }
       continue
     }
