@@ -480,6 +480,42 @@ function featuresToPrimitives(layer: OdbLayer): Primitive[] {
   return prims
 }
 
+// ---------- 铜箔(填充区)几何连通辅助 ----------
+// 射线法判断点是否在多边形内(偶奇规则，可处理带孔轮廓)。
+function pointInPoly(poly: number[][], x: number, y: number): boolean {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0]
+    const yi = poly[i][1]
+    const xj = poly[j][0]
+    const yj = poly[j][1]
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
+// 点是否落在铜箔(surface)内部：在外部轮廓内、且不在任何内孔(隔离环/反焊盘)内。
+function pointInSurface(f: OdbFeature, x: number, y: number): boolean {
+  if (!f.poly || f.poly.length < 3) return false
+  if (!pointInPoly(f.poly, x, y)) return false
+  if (f.holes) for (const h of f.holes) if (h.length >= 3 && pointInPoly(h, x, y)) return false
+  return true
+}
+
+// 取一个图元的“代表点”用于点在多边形测试（铺铜内部图元判定）。
+function featureTestPoints(f: OdbFeature): [number, number][] {
+  if (f.kind === 'pad' && f.x != null) return [[f.x, f.y!]]
+  if (f.kind === 'line' && f.x1 != null)
+    return [
+      [f.x1, f.y1!],
+      [(f.x1 + f.x2!) / 2, (f.y1! + f.y2!) / 2],
+      [f.x2!, f.y2!],
+    ]
+  if (f.kind === 'arc' && f.x1 != null) return [[(f.x1 + f.x2!) / 2, (f.y1! + f.y2!) / 2]]
+  return []
+}
+
 interface OdbNetResult {
   nets: Net[]
   primToComp: number[]
@@ -492,8 +528,79 @@ function computeOdbNets(layer: OdbLayer): OdbNetResult {
   const parsed: ParsedLayer = { blocks: [], setupIdx: -1, modeIdx: -1, apertureSelectIdx: -1, endBlock: -1, primitives: prims } as unknown as ParsedLayer
   const components = computeNets(parsed)
 
+  // 初版：图元 -> computeNets 组件索引
+  const baseToComp = new Array(prims.length).fill(-1)
+  components.forEach((net, ci) => net.primitiveIdxs.forEach((pi) => (baseToComp[pi] = ci)))
+
+  // ---- 几何连通补充：铜箔内部图元并入铜箔所在组件 ----
+  // computeNets 仅基于边界采样，无法连接远离边界、完全落在铜箔内部的图元
+  // （如铺铜中央的过孔/焊盘）。这些图元在电气上同属该铜箔网络，应强制合并。
+  const compParent = baseToComp.map((_, i) => i) // 以组件索引为并查集节点
+  const cfind = (x: number): number => {
+    while (compParent[x] !== x) {
+      compParent[x] = compParent[compParent[x]]
+      x = compParent[x]
+    }
+    return x
+  }
+  const cunion = (a: number, b: number) => {
+    const ra = cfind(a)
+    const rb = cfind(b)
+    if (ra !== rb) compParent[ra] = rb
+  }
+
+  // 预计算每个铜箔的包围盒，作为点在多边形测试的快筛。
+  const surfBoxes: { minX: number; minY: number; maxX: number; maxY: number }[] = layer.features.map((f) => {
+    if (f.kind !== 'surface' || !f.poly) return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const [px, py] of f.poly) {
+      minX = Math.min(minX, px)
+      minY = Math.min(minY, py)
+      maxX = Math.max(maxX, px)
+      maxY = Math.max(maxY, py)
+    }
+    return { minX, minY, maxX, maxY }
+  })
+
+  for (let i = 0; i < layer.features.length; i++) {
+    const sf = layer.features[i]
+    if (sf.kind !== 'surface') continue
+    const box = surfBoxes[i]
+    const cS = cfind(baseToComp[i])
+    for (let j = 0; j < layer.features.length; j++) {
+      if (j === i) continue
+      const f = layer.features[j]
+      if (f.kind === 'surface') continue
+      for (const [x, y] of featureTestPoints(f)) {
+        if (x < box.minX || x > box.maxX || y < box.minY || y > box.maxY) continue
+        if (pointInSurface(sf, x, y)) {
+          const cJ = cfind(baseToComp[j])
+          if (cJ !== cS) cunion(cS, cJ)
+          break
+        }
+      }
+    }
+  }
+
+  // 重新聚合：合并后的组件 -> 图元集合
+  const groups = new Map<number, number[]>()
+  for (let i = 0; i < prims.length; i++) {
+    const r = cfind(baseToComp[i])
+    if (!groups.has(r)) groups.set(r, [])
+    groups.get(r)!.push(i)
+  }
+  const mergedComps: Net[] = []
+  let mid = 0
+  for (const [, idxs] of groups) {
+    mergedComps.push({ id: mid++, name: '', primitiveIdxs: idxs, explicit: false })
+  }
+
+  // 最终：图元 -> 合并后组件（用于网表 seed 匹配）
   const primToComp = new Array(prims.length).fill(-1)
-  components.forEach((net, ci) => net.primitiveIdxs.forEach((pi) => (primToComp[pi] = ci)))
+  mergedComps.forEach((net, ci) => net.primitiveIdxs.forEach((pi) => (primToComp[pi] = ci)))
 
   // 采样点云 + 空间网格（用于网表 seed 匹配）
   const samples: Sample[] = []
@@ -510,7 +617,7 @@ function computeOdbNets(layer: OdbLayer): OdbNetResult {
     if (!grid.has(k)) grid.set(k, [])
     grid.get(k)!.push(si)
   }
-  return { nets: components, primToComp, samples, grid }
+  return { nets: mergedComps, primToComp, samples, grid }
 }
 
 // ---------- 顶层解析 ----------
@@ -583,6 +690,17 @@ export async function parseOdb(entries: FileEntry[]): Promise<OdbDesign> {
             }
             if (hit >= 0) break
           }
+        // 回退：邻近图元样本未命中时，若种子点落在某铜箔(surface)内部，
+        // 则该铜箔即为此网（铺铜内部常无贴近边界的图元样本）。
+        if (hit < 0) {
+          for (let fi = 0; fi < layer.features.length; fi++) {
+            const f = layer.features[fi]
+            if (f.kind === 'surface' && pointInSurface(f, seed.x, seed.y)) {
+              hit = fi
+              break
+            }
+          }
+        }
         if (hit >= 0) {
           const comp = primToComp[hit]
           if (!netToComps.has(seed.netref)) netToComps.set(seed.netref, new Set())
