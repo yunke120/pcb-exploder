@@ -11,6 +11,11 @@ dist/
 *.tsbuildinfo
 *.log
 
+# ---------- 桌面打包产物（Win7 离线版） ----------
+release/
+release-*/
+.ebcache/
+
 # ---------- 系统 / 编辑器 ----------
 .DS_Store
 Thumbs.db
