@@ -125,18 +125,18 @@ function SpacingMarker({
   const my = (a.y + b.y) / 2
   const len = Math.hypot(b.x - a.x, b.y - a.y)
   const ang = Math.atan2(b.y - a.y, b.x - a.x)
-  const zz = z + 0.025
-  const dotR = 0.014
+  const zz = z + 0.008
+  const dotR = 0.012
   return (
     <group>
-      {/* 最近点连线 */}
+      {/* 最近点连线（亮红色细线，贴合所在层） */}
       {len > 1e-6 && (
         <mesh position={[mx, my, zz]} rotation={[0, 0, ang]}>
-          <planeGeometry args={[len, 0.008]} />
+          <planeGeometry args={[len, 0.003]} />
           <meshBasicMaterial
-            color="#ffe135"
+            color="#ff2b2b"
             transparent
-            opacity={0.95}
+            opacity={1}
             depthTest={false}
             toneMapped={false}
             side={THREE.DoubleSide}
@@ -169,8 +169,8 @@ function SpacingMarker({
             fontSize: 12,
             fontFamily: 'Menlo, Consolas, monospace',
             fontWeight: 600,
-            color: '#0d1a26',
-            background: '#ffe135',
+            color: '#ffffff',
+            background: '#ff2b2b',
             padding: '2px 7px',
             borderRadius: 4,
             boxShadow: '0 1px 4px rgba(0,0,0,0.5)',
