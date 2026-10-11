@@ -1,26 +1,59 @@
 import { useMemo, useState } from 'react'
-import type { LayerItem } from '../App'
+import type { LayerItem, MergedNet } from '../App'
 
 interface Props {
   items: LayerItem[]
+  mergedNets: MergedNet[]
   selected: Set<string>
   onToggle: (key: string) => void
   onClear: () => void
 }
 
-export default function NetPanel({ items, selected, onToggle, onClear }: Props) {
+export default function NetPanel({ items, mergedNets, selected, onToggle, onClear }: Props) {
   const [query, setQuery] = useState('')
 
-  const layersWithNets = useMemo(
-    () => items.filter((i) => i.nets && i.nets.length > 0),
+  // 各层中“未命名（非显式）”的网络，仍按层单独展示
+  const nonExplicit = useMemo(
+    () =>
+      items
+        .filter((i) => i.nets && i.nets.some((n) => !n.explicit))
+        .map((layer) => ({ layer, nets: layer.nets!.filter((n) => !n.explicit) })),
     [items],
   )
 
   const q = query.trim().toLowerCase()
-  const totalNets = layersWithNets.reduce((s, l) => s + (l.nets?.length ?? 0), 0)
+  const totalNets = mergedNets.length + nonExplicit.reduce((s, l) => s + l.nets.length, 0)
   const selectedCount = selected.size
 
-  if (layersWithNets.length === 0) return null
+  if (totalNets === 0) return null
+
+  const mergedRows = mergedNets.filter((m) => !q || m.name.toLowerCase().includes(q))
+  const nonExp = nonExplicit
+    .map(({ layer, nets }) => ({
+      layer,
+      nets: nets.filter(
+        (n) => !q || n.name.toLowerCase().includes(q) || layer.meta.name.toLowerCase().includes(q),
+      ),
+    }))
+    .filter((g) => g.nets.length > 0)
+
+  if (mergedRows.length === 0 && nonExp.length === 0) {
+    return (
+      <div className="section net-panel">
+        <div className="section-title">
+          网络高亮
+          <span className="net-count">{totalNets} 个网络</span>
+        </div>
+        <input
+          className="net-search"
+          placeholder="搜索网络名 / 层…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <div className="net-hint">没有匹配 “{query}” 的网络</div>
+      </div>
+    )
+  }
 
   return (
     <div className="section net-panel">
@@ -44,34 +77,55 @@ export default function NetPanel({ items, selected, onToggle, onClear }: Props) 
       />
 
       <div className="net-list">
-        {layersWithNets.map((layer) => {
-          const nets = (layer.nets ?? []).filter((n) =>
-            q ? n.name.toLowerCase().includes(q) || layer.meta.name.toLowerCase().includes(q) : true,
-          )
-          if (nets.length === 0) return null
-          return (
-            <div className="net-layer" key={layer.id}>
-              <div className="net-layer-name" style={{ borderLeftColor: layer.meta.color }}>
-                {layer.meta.name}
-                <span className="net-layer-sub">{nets.length}</span>
-              </div>
-              {nets.map((net) => {
-                const key = `${layer.id}::${net.id}`
-                const checked = selected.has(key)
-                return (
-                  <label className="net-row" key={key}>
-                    <input type="checkbox" checked={checked} onChange={() => onToggle(key)} />
-                    <span className="net-name">{net.name}</span>
-                    {net.explicit && <span className="net-tag">X2</span>}
-                    <span className="net-sub">{net.primitiveIdxs.length}</span>
-                  </label>
-                )
-              })}
+        {mergedRows.length > 0 && (
+          <>
+            <div className="net-group-title">
+              按名称合并（跨层）
+              <span className="net-layer-sub">{mergedRows.length}</span>
             </div>
-          )
-        })}
+            {mergedRows.map((m) => {
+              const key = m.name
+              const checked = selected.has(key)
+              return (
+                <label className="net-row" key={key}>
+                  <input type="checkbox" checked={checked} onChange={() => onToggle(key)} />
+                  <span className="net-name" title={m.members.map((mm) => mm.layerName).join('、')}>
+                    {m.name}
+                  </span>
+                  <span className="net-tag">X2</span>
+                  {m.members.length > 1 && (
+                    <span className="net-layer-sub" title={m.members.map((mm) => mm.layerName).join('、')}>
+                      ×{m.members.length} 层
+                    </span>
+                  )}
+                  <span className="net-sub">{m.totalCount}</span>
+                </label>
+              )
+            })}
+          </>
+        )}
+
+        {nonExp.map(({ layer, nets }) => (
+          <div className="net-layer" key={layer.id}>
+            <div className="net-layer-name" style={{ borderLeftColor: layer.meta.color }}>
+              {layer.meta.name}
+              <span className="net-layer-sub">{nets.length}</span>
+            </div>
+            {nets.map((net) => {
+              const key = `${layer.id}::${net.id}`
+              const checked = selected.has(key)
+              return (
+                <label className="net-row" key={key}>
+                  <input type="checkbox" checked={checked} onChange={() => onToggle(key)} />
+                  <span className="net-name">{net.name}</span>
+                  <span className="net-sub">{net.primitiveIdxs.length}</span>
+                </label>
+              )
+            })}
+          </div>
+        ))}
       </div>
-      <div className="net-hint">勾选网络后，对应铜层上将以高亮色描出该网络</div>
+      <div className="net-hint">勾选网络后，对应铜层上将以高亮色描出该网络（同层与跨层同名网络一并高亮）</div>
     </div>
   )
 }

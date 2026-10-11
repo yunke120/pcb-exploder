@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import JSZip from 'jszip'
 import DropZone, { type DroppedItem } from './components/DropZone'
 import LayerPanel from './components/LayerPanel'
@@ -31,6 +31,20 @@ export interface LayerItem {
   odb?: OdbLayer
   /** 该层识别出的网络列表 */
   nets?: Net[]
+}
+
+/** 跨层合并后的网络：同一显式网名（如 AGND）分布于多层时归并为一条 */
+export interface MergedNetMember {
+  layerId: string
+  netId: number
+  layerName: string
+  primCount: number
+}
+export interface MergedNet {
+  name: string
+  members: MergedNetMember[]
+  /** 跨层图元总数，用于排序与展示 */
+  totalCount: number
 }
 
 const ACCEPTED = /\.(gbr|gtl|gbl|gts|gbs|gto|gbo|gtp|gbp|gko|gm\d|gml|g\d|gp\d|in\d|drl|txt)$/i
@@ -111,6 +125,31 @@ export default function App() {
   const [selectedNets, setSelectedNets] = useState<Set<string>>(new Set())
   const [netOverlays, setNetOverlays] = useState<Record<string, import('three').Texture>>({})
   const HIGHLIGHT_COLOR = '#16f0ff'
+
+  // 跨层合并：仅对“显式命名”的网络（ODB++ 真实网名）按名称归并；
+  // Gerber 合成名（Net N）每层独立、不可合并，仍按层展示。
+  const mergedNets = useMemo<MergedNet[]>(() => {
+    const byName = new Map<string, MergedNet>()
+    for (const layer of items) {
+      if (!layer.nets || layer.nets.length === 0) continue
+      for (const net of layer.nets) {
+        if (!net.explicit) continue
+        let m = byName.get(net.name)
+        if (!m) {
+          m = { name: net.name, members: [], totalCount: 0 }
+          byName.set(net.name, m)
+        }
+        m.members.push({
+          layerId: layer.id,
+          netId: net.id,
+          layerName: layer.meta.name,
+          primCount: net.primitiveIdxs.length,
+        })
+        m.totalCount += net.primitiveIdxs.length
+      }
+    }
+    return [...byName.values()].sort((a, b) => b.totalCount - a.totalCount)
+  }, [items])
 
   // ---- ODB++ 分支 ----
   const handleOdb = useCallback(async (dropped: DroppedItem[]) => {
@@ -262,16 +301,28 @@ export default function App() {
     let cancelled = false
     async function run() {
       const byLayer = new Map<string, Net[]>()
-      for (const key of selectedNets) {
-        const sep = key.indexOf('::')
-        const layerId = key.slice(0, sep)
-        const netId = Number(key.slice(sep + 2))
-        const layer = itemsRef.current.find((i) => i.id === layerId)
-        if (!layer?.nets) continue
-        const net = layer.nets.find((n) => n.id === netId)
-        if (!net) continue
+      const pushOne = (layerId: string, net: Net) => {
         if (!byLayer.has(layerId)) byLayer.set(layerId, [])
         byLayer.get(layerId)!.push(net)
+      }
+      for (const key of selectedNets) {
+        if (key.includes('::')) {
+          // 非显式（Gerber 合成）网络：单层单网
+          const sep = key.indexOf('::')
+          const layerId = key.slice(0, sep)
+          const netId = Number(key.slice(sep + 2))
+          const layer = itemsRef.current.find((i) => i.id === layerId)
+          const net = layer?.nets?.find((n) => n.id === netId)
+          if (net) pushOne(layerId, net)
+        } else {
+          // 显式网络：按名称展开到所有含该网的铜层
+          for (const layer of itemsRef.current) {
+            if (!layer.nets) continue
+            for (const net of layer.nets) {
+              if (net.explicit && net.name === key) pushOne(layer.id, net)
+            }
+          }
+        }
       }
       if (byLayer.size === 0) {
         setNetOverlays((prev) => {
@@ -345,6 +396,7 @@ export default function App() {
         />
         <NetPanel
           items={items}
+          mergedNets={mergedNets}
           selected={selectedNets}
           onToggle={(key: string) =>
             setSelectedNets((prev) => {

@@ -181,6 +181,13 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   background: #fff; color: var(--ink);
 }
 .net-list { max-height: 280px; overflow-y: auto; }
+.net-group-title {
+  font-size: 11px; letter-spacing: 0.5px; color: var(--ink-soft);
+  padding: 4px 6px 4px 10px; margin: 6px 0 2px;
+  display: flex; align-items: center; gap: 6px;
+  background: var(--paper-2); border-radius: 4px;
+}
+.net-group-title .net-layer-sub { margin-left: auto; }
 .net-layer { margin-bottom: 10px; }
 .net-layer-name {
   font-size: 12px; font-weight: bold; color: var(--ink);
