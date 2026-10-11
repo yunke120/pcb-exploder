@@ -7,14 +7,11 @@
 
 import * as THREE from 'three'
 import { layerColor, type LayerKind, type LayerMeta } from './layers'
-import type { ParsedLayer, Primitive } from './gerberParse'
 import type { Net } from './nets'
-import { computeNets } from './nets'
 import type { GlobalBox, ViewBox } from './gerber'
 
 const INCH_TO_MM = 25.4
 const MIL_TO_MM = 0.0254
-const NET_TOL = 0.15 // mm，连通容差
 
 // ODB++ 网表（netlist）常为 GBK 编码，浏览器默认按 UTF-8 读取会产生乱码。
 // 这里先按 UTF-8 严格解码；若字节序列非法（即并非 UTF-8，很可能是 GBK），
@@ -406,81 +403,7 @@ function odbMeta(type: string, name: string, row: number, polarity: string): Lay
   }
 }
 
-// ---------- 几何连通性（复用 nets.ts） ----------
-interface Sample {
-  x: number
-  y: number
-  r: number
-  p: number
-}
-function primSamples(pr: Primitive, out: Sample[]) {
-  for (const o of pr.obs) {
-    if (o.type === 'c') out.push({ x: o.x, y: o.y, r: o.r, p: -1 })
-    else {
-      const len = Math.hypot(o.x1 - o.x0, o.y1 - o.y0)
-      const steps = Math.max(1, Math.min(64, Math.ceil(len / 0.4)))
-      for (let s = 0; s <= steps; s++) {
-        const t = s / steps
-        out.push({ x: o.x0 + (o.x1 - o.x0) * t, y: o.y0 + (o.y1 - o.y0) * t, r: o.w, p: -1 })
-      }
-    }
-  }
-}
-
-type Obstacle =
-  | { type: 'c'; x: number; y: number; r: number }
-  | { type: 's'; x0: number; y0: number; x1: number; y1: number; w: number }
-
-function featuresToPrimitives(layer: OdbLayer): Primitive[] {
-  const prims: Primitive[] = []
-  for (const f of layer.features) {
-    const obs: Obstacle[] = []
-    const sym = layer.symbols[f.symbol]
-    const half = (sym?.d ?? Math.min(sym?.w ?? 1, sym?.h ?? 1)) / 2
-    if (f.kind === 'pad' && f.x != null && f.y != null) {
-      obs.push({ type: 'c', x: f.x, y: f.y, r: half })
-    } else if (f.kind === 'line' && f.x1 != null) {
-      obs.push({ type: 's', x0: f.x1, y0: f.y1!, x1: f.x2!, y1: f.y2!, w: half })
-    } else if (f.kind === 'arc' && f.x1 != null && f.cx != null) {
-      const r = Math.hypot(f.x1 - f.cx, f.y1! - f.cy!)
-      if (r < 1e-6) {
-        obs.push({ type: 'c', x: f.x1, y: f.y1!, r: half })
-      } else {
-        const a1 = Math.atan2(f.y1! - f.cy!, f.x1 - f.cx!)
-        const a2 = Math.atan2(f.y2! - f.cy!, f.x2! - f.cx!)
-        const steps = 24
-        let da = a2 - a1
-        while (da > Math.PI) da -= 2 * Math.PI
-        while (da < -Math.PI) da += 2 * Math.PI
-        for (let s = 0; s <= steps; s++) {
-          const a = a1 + (da * s) / steps
-          obs.push({ type: 'c', x: f.cx + Math.cos(a) * r, y: f.cy! + Math.sin(a) * r, r: half })
-        }
-      }
-    } else if (f.kind === 'surface' && f.poly) {
-      // 沿多边形边界以 ~1mm 步长细分采样，并保留 0.1mm 半径，
-      // 使铜箔填充区（surface）能与落在边缘的焊盘/走线相连。
-      for (let k = 0; k < f.poly.length - 1; k++) {
-        const [x0, y0] = f.poly[k]
-        const [x1, y1] = f.poly[k + 1]
-        const len = Math.hypot(x1 - x0, y1 - y0)
-        const steps = Math.max(1, Math.min(256, Math.ceil(len)))
-        for (let s = 0; s <= steps; s++) {
-          const t = s / steps
-          const px = x0 + (x1 - x0) * t
-          const py = y0 + (y1 - y0) * t
-          obs.push({ type: 's', x0: px, y0: py, x1: px, y1: py, w: 0.1 })
-        }
-      }
-    }
-    const pkind: Primitive['kind'] =
-      f.kind === 'pad' ? 'flash' : f.kind === 'line' ? 'draw' : f.kind === 'arc' ? 'arc' : 'region'
-    prims.push({ kind: pkind, aperture: '', size: 0, obs: obs as Obstacle[], spanStart: 0, spanEnd: 0, netName: '', x: f.x, y: f.y })
-  }
-  return prims
-}
-
-// ---------- 铜箔(填充区)几何连通辅助 ----------
+// ---------- 铜箔(填充区)几何辅助 ----------
 // 射线法判断点是否在多边形内(偶奇规则，可处理带孔轮廓)。
 function pointInPoly(poly: number[][], x: number, y: number): boolean {
   let inside = false
@@ -503,121 +426,264 @@ function pointInSurface(f: OdbFeature, x: number, y: number): boolean {
   return true
 }
 
-// 取一个图元的“代表点”用于点在多边形测试（铺铜内部图元判定）。
-function featureTestPoints(f: OdbFeature): [number, number][] {
-  if (f.kind === 'pad' && f.x != null) return [[f.x, f.y!]]
-  if (f.kind === 'line' && f.x1 != null)
-    return [
-      [f.x1, f.y1!],
-      [(f.x1 + f.x2!) / 2, (f.y1! + f.y2!) / 2],
-      [f.x2!, f.y2!],
-    ]
-  if (f.kind === 'arc' && f.x1 != null) return [[(f.x1 + f.x2!) / 2, (f.y1! + f.y2!) / 2]]
-  return []
-}
+// ---------- 网络重建：种子点直接绑定（不做邻近连通，避免跨安全间距误连） ----------
+// ODB++ netlist 的 points 段为每个焊盘/过孔给出 (netref, 直径, x, y) 种子点，
+// 即“某位置的焊盘属于某网络”的权威信息。据此：
+//   1) 焊盘(pad)      —— 种子点中心匹配，直接绑定网名；
+//   2) 铜箔(surface)  —— 由落在其内部(不含内孔)的焊盘/种子点众数确定网名；
+//   3) 走线(line/arc) —— 按“端点精确重合”连通到焊盘/走线/铜箔后传播网名。
+// 完全不再用边界采样 + 容差的邻近连通（那会把仅隔正常安全间距的不同网络铜箔误连）。
+function computeOdbNets(layer: OdbLayer, netlist: Netlist): Net[] {
+  const feats = layer.features
+  const n = feats.length
+  if (n === 0) return []
+  const netNames = netlist.netNames
+  const seeds = netlist.seeds.filter((s) => s.netref > 0)
+  const featNet = new Int32Array(n).fill(-1) // 图元索引 -> netref（-1 未绑定）
 
-interface OdbNetResult {
-  nets: Net[]
-  primToComp: number[]
-  samples: Sample[]
-  grid: Map<string, number[]>
-}
+  const isTrace = (f: OdbFeature) => f.kind === 'line' || f.kind === 'arc'
+  const traceEnds = (f: OdbFeature): [number, number][] => {
+    if (f.kind === 'line' && f.x1 != null) return [[f.x1, f.y1!], [f.x2!, f.y2!]]
+    if (f.kind === 'arc' && f.x1 != null) return [[f.x1, f.y1!], [f.x2!, f.y2!]]
+    return []
+  }
+  // 走线中心线采样点（用于判断走线是否“穿过”铜箔内部，从而与铜箔同网）
+  const traceSamples = (f: OdbFeature): [number, number][] => {
+    if (f.kind === 'line' && f.x1 != null) {
+      const x0 = f.x1
+      const y0 = f.y1!
+      const x1 = f.x2!
+      const y1 = f.y2!
+      const len = Math.hypot(x1 - x0, y1 - y0)
+      const steps = Math.max(1, Math.min(48, Math.ceil(len / 1.5)))
+      const pts: [number, number][] = []
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps
+        pts.push([x0 + (x1 - x0) * t, y0 + (y1 - y0) * t])
+      }
+      return pts
+    }
+    if (f.kind === 'arc' && f.x1 != null && f.cx != null) {
+      const r = Math.hypot(f.x1 - f.cx, f.y1! - f.cy!)
+      const a1 = Math.atan2(f.y1! - f.cy!, f.x1 - f.cx!)
+      const a2 = Math.atan2(f.y2! - f.cy!, f.x2! - f.cx!)
+      let da = a2 - a1
+      while (da > Math.PI) da -= 2 * Math.PI
+      while (da < -Math.PI) da += 2 * Math.PI
+      const steps = 24
+      const pts: [number, number][] = []
+      for (let s = 0; s <= steps; s++) {
+        const a = a1 + (da * s) / steps
+        pts.push([f.cx + Math.cos(a) * r, f.cy! + Math.sin(a) * r])
+      }
+      return pts
+    }
+    return []
+  }
 
-function computeOdbNets(layer: OdbLayer): OdbNetResult {
-  const prims = featuresToPrimitives(layer)
-  const parsed: ParsedLayer = { blocks: [], setupIdx: -1, modeIdx: -1, apertureSelectIdx: -1, endBlock: -1, primitives: prims } as unknown as ParsedLayer
-  const components = computeNets(parsed)
+  // ---- 1) 焊盘：种子点中心匹配直接绑定网名 ----
+  const SC = 1 // mm，种子网格粒度
+  const seedGrid = new Map<string, number[]>()
+  seeds.forEach((s, i) => {
+    const k = `${Math.floor(s.x / SC)},${Math.floor(s.y / SC)}`
+    if (!seedGrid.has(k)) seedGrid.set(k, [])
+    seedGrid.get(k)!.push(i)
+  })
+  const findSeedNet = (x: number, y: number, tol: number): number => {
+    let best = -1
+    let bestD = tol
+    const cx = Math.floor(x / SC)
+    const cy = Math.floor(y / SC)
+    for (let gx = -1; gx <= 1; gx++)
+      for (let gy = -1; gy <= 1; gy++) {
+        const bucket = seedGrid.get(`${cx + gx},${cy + gy}`)
+        if (!bucket) continue
+        for (const si of bucket) {
+          const s = seeds[si]
+          const d = Math.hypot(s.x - x, s.y - y)
+          if (d < bestD) {
+            bestD = d
+            best = s.netref
+          }
+        }
+      }
+    return best
+  }
+  for (let i = 0; i < n; i++) {
+    const f = feats[i]
+    if (f.kind === 'pad' && f.x != null) {
+      const nr = findSeedNet(f.x, f.y!, 0.15)
+      if (nr > 0) featNet[i] = nr
+    }
+  }
 
-  // 初版：图元 -> computeNets 组件索引
-  const baseToComp = new Array(prims.length).fill(-1)
-  components.forEach((net, ci) => net.primitiveIdxs.forEach((pi) => (baseToComp[pi] = ci)))
+  // 各图元包围盒（铜箔=多边形 bbox，走线=端点 bbox，焊盘=点）
+  const featBox = feats.map((f) => {
+    if (f.kind === 'surface' && f.poly) {
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const [px, py] of f.poly) {
+        minX = Math.min(minX, px)
+        minY = Math.min(minY, py)
+        maxX = Math.max(maxX, px)
+        maxY = Math.max(maxY, py)
+      }
+      return { minX, minY, maxX, maxY }
+    }
+    if (f.kind === 'pad' && f.x != null) return { minX: f.x, minY: f.y!, maxX: f.x, maxY: f.y! }
+    const ends = traceEnds(f)
+    if (ends.length) {
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const [x, y] of ends) {
+        minX = Math.min(minX, x)
+        minY = Math.min(minY, y)
+        maxX = Math.max(maxX, x)
+        maxY = Math.max(maxY, y)
+      }
+      const m = 0.5 // 线宽余量
+      return { minX: minX - m, minY: minY - m, maxX: maxX + m, maxY: maxY + m }
+    }
+    return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+  })
 
-  // ---- 几何连通补充：铜箔内部图元并入铜箔所在组件 ----
-  // computeNets 仅基于边界采样，无法连接远离边界、完全落在铜箔内部的图元
-  // （如铺铜中央的过孔/焊盘）。这些图元在电气上同属该铜箔网络，应强制合并。
-  const compParent = baseToComp.map((_, i) => i) // 以组件索引为并查集节点
-  const cfind = (x: number): number => {
-    while (compParent[x] !== x) {
-      compParent[x] = compParent[compParent[x]]
-      x = compParent[x]
+  // ---- 2) 连通图（并查集） ----
+  const PC = 0.5 // mm，端点网格粒度
+  const pointGrid = new Map<string, number[]>()
+  const addPoint = (x: number, y: number, fi: number) => {
+    const k = `${Math.round(x / PC)},${Math.round(y / PC)}`
+    if (!pointGrid.has(k)) pointGrid.set(k, [])
+    pointGrid.get(k)!.push(fi)
+  }
+  for (let i = 0; i < n; i++) {
+    const f = feats[i]
+    if (f.kind === 'pad' && f.x != null) addPoint(f.x, f.y!, i)
+    else if (isTrace(f)) for (const [x, y] of traceEnds(f)) addPoint(x, y, i)
+  }
+
+  const parent = new Array(n).fill(0).map((_, i) => i)
+  const find = (x: number): number => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]]
+      x = parent[x]
     }
     return x
   }
-  const cunion = (a: number, b: number) => {
-    const ra = cfind(a)
-    const rb = cfind(b)
-    if (ra !== rb) compParent[ra] = rb
+  const union = (a: number, b: number) => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent[ra] = rb
   }
 
-  // 预计算每个铜箔的包围盒，作为点在多边形测试的快筛。
-  const surfBoxes: { minX: number; minY: number; maxX: number; maxY: number }[] = layer.features.map((f) => {
-    if (f.kind !== 'surface' || !f.poly) return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
-    let minX = Infinity
-    let minY = Infinity
-    let maxX = -Infinity
-    let maxY = -Infinity
-    for (const [px, py] of f.poly) {
-      minX = Math.min(minX, px)
-      minY = Math.min(minY, py)
-      maxX = Math.max(maxX, px)
-      maxY = Math.max(maxY, py)
+  const END_TOL = 0.1 // mm，端点重合容差
+  // 2a) 走线端点 ↔ 焊盘/走线（精确重合）
+  for (let i = 0; i < n; i++) {
+    const f = feats[i]
+    if (!isTrace(f)) continue
+    for (const [x, y] of traceEnds(f)) {
+      const cx = Math.round(x / PC)
+      const cy = Math.round(y / PC)
+      for (let gx = -1; gx <= 1; gx++)
+        for (let gy = -1; gy <= 1; gy++) {
+          const bucket = pointGrid.get(`${cx + gx},${cy + gy}`)
+          if (!bucket) continue
+          for (const j of bucket) {
+            if (j === i) continue
+            const g = feats[j]
+            if (g.kind === 'pad' && g.x != null) {
+              if (Math.hypot(g.x - x, g.y! - y) <= END_TOL) union(i, j)
+            } else if (isTrace(g)) {
+              for (const [ex, ey] of traceEnds(g)) if (Math.hypot(ex - x, ey - y) <= END_TOL) {
+                union(i, j)
+                break
+              }
+            }
+          }
+        }
     }
-    return { minX, minY, maxX, maxY }
-  })
-
-  for (let i = 0; i < layer.features.length; i++) {
-    const sf = layer.features[i]
+  }
+  // 2b) 图元落在铜箔内部 → 与该铜箔同网（焊盘中心 / 走线中心线采样点）
+  for (let i = 0; i < n; i++) {
+    const sf = feats[i]
     if (sf.kind !== 'surface') continue
-    const box = surfBoxes[i]
-    const cS = cfind(baseToComp[i])
-    for (let j = 0; j < layer.features.length; j++) {
+    const box = featBox[i]
+    for (let j = 0; j < n; j++) {
       if (j === i) continue
-      const f = layer.features[j]
-      if (f.kind === 'surface') continue
-      for (const [x, y] of featureTestPoints(f)) {
-        if (x < box.minX || x > box.maxX || y < box.minY || y > box.maxY) continue
-        if (pointInSurface(sf, x, y)) {
-          const cJ = cfind(baseToComp[j])
-          if (cJ !== cS) cunion(cS, cJ)
-          break
+      const g = feats[j]
+      const gb = featBox[j]
+      if (gb.maxX < box.minX || gb.minX > box.maxX || gb.maxY < box.minY || gb.minY > box.maxY) continue
+      let joined = false
+      if (g.kind === 'pad' && g.x != null) {
+        if (pointInSurface(sf, g.x, g.y!)) joined = true
+      } else if (isTrace(g)) {
+        for (const [x, y] of traceSamples(g)) {
+          if (x < box.minX || x > box.maxX || y < box.minY || y > box.maxY) continue
+          if (pointInSurface(sf, x, y)) {
+            joined = true
+            break
+          }
         }
       }
+      if (joined) union(i, j)
     }
   }
 
-  // 重新聚合：合并后的组件 -> 图元集合
-  const groups = new Map<number, number[]>()
-  for (let i = 0; i < prims.length; i++) {
-    const r = cfind(baseToComp[i])
-    if (!groups.has(r)) groups.set(r, [])
-    groups.get(r)!.push(i)
+  // ---- 传播：每个连通分量取其成员已知网名的众数，赋给全体成员 ----
+  const compCounts = new Map<number, Map<number, number>>() // root -> netref -> 计数
+  for (let i = 0; i < n; i++) {
+    const nr = featNet[i]
+    if (nr <= 0) continue
+    const r = find(i)
+    if (!compCounts.has(r)) compCounts.set(r, new Map())
+    const m = compCounts.get(r)!
+    m.set(nr, (m.get(nr) || 0) + 1)
   }
-  const mergedComps: Net[] = []
-  let mid = 0
-  for (const [, idxs] of groups) {
-    mergedComps.push({ id: mid++, name: '', primitiveIdxs: idxs, explicit: false })
+  const compFinal = new Map<number, number>() // root -> 选定 netref
+  for (const [r, m] of compCounts) {
+    let bestNr = -1
+    let bestC = -1
+    for (const [nr, c] of m) if (c > bestC) {
+      bestC = c
+      bestNr = nr
+    }
+    compFinal.set(r, bestNr)
+  }
+  for (let i = 0; i < n; i++) {
+    if (featNet[i] > 0) continue
+    const nr = compFinal.get(find(i))
+    if (nr != null && nr > 0) featNet[i] = nr
   }
 
-  // 最终：图元 -> 合并后组件（用于网表 seed 匹配）
-  const primToComp = new Array(prims.length).fill(-1)
-  mergedComps.forEach((net, ci) => net.primitiveIdxs.forEach((pi) => (primToComp[pi] = ci)))
-
-  // 采样点云 + 空间网格（用于网表 seed 匹配）
-  const samples: Sample[] = []
-  const grid = new Map<string, number[]>()
-  const CELL = 2
-  const key = (cx: number, cy: number) => `${Math.floor(cx / CELL)},${Math.floor(cy / CELL)}`
-  prims.forEach((pr, i) => {
-    const list: Sample[] = []
-    primSamples(pr, list)
-    for (const s of list) samples.push({ ...s, p: i })
-  })
-  for (let si = 0; si < samples.length; si++) {
-    const k = key(samples[si].x, samples[si].y)
-    if (!grid.has(k)) grid.set(k, [])
-    grid.get(k)!.push(si)
+  // ---- 组装 Net[]：已绑定网名 → 显式网络；未绑定 → 按连通分量合成网络 ----
+  const byNet = new Map<number, number[]>()
+  for (let i = 0; i < n; i++) {
+    const nr = featNet[i]
+    if (nr <= 0) continue
+    if (!byNet.has(nr)) byNet.set(nr, [])
+    byNet.get(nr)!.push(i)
   }
-  return { nets: mergedComps, primToComp, samples, grid }
+  const nets: Net[] = []
+  let id = 0
+  for (const [nr, idxs] of byNet) {
+    nets.push({ id: id++, name: netNames[nr] || `Net ${nr}`, primitiveIdxs: idxs, explicit: true })
+  }
+  const unassignedByRoot = new Map<number, number[]>()
+  for (let i = 0; i < n; i++) {
+    if (featNet[i] > 0) continue
+    const r = find(i)
+    if (!unassignedByRoot.has(r)) unassignedByRoot.set(r, [])
+    unassignedByRoot.get(r)!.push(i)
+  }
+  let synth = 1
+  for (const [, idxs] of unassignedByRoot) {
+    nets.push({ id: id++, name: `Net ${synth++}`, primitiveIdxs: idxs, explicit: false })
+  }
+  nets.sort((a, b) => b.primitiveIdxs.length - a.primitiveIdxs.length)
+  return nets
 }
 
 // ---------- 顶层解析 ----------
@@ -668,66 +734,9 @@ export async function parseOdb(entries: FileEntry[]): Promise<OdbDesign> {
       features: parsed.features,
       vb: parsed.vb,
     }
-    // 铜层重建网络（按网表 seed 标注真实网名）
+    // 铜层重建网络（种子点直接绑定网名）
     if (meta.kind === 'topCopper' || meta.kind === 'bottomCopper' || meta.kind === 'innerCopper') {
-      const { nets, primToComp, grid, samples } = computeOdbNets(layer)
-      const CELL = 2
-      // 为每个真实网名收集其命中的 component
-      const netToComps = new Map<number, Set<number>>()
-      for (const seed of netlist.seeds) {
-        if (seed.netref <= 0) continue
-        let hit = -1
-        for (let gx = -1; gx <= 1; gx++)
-          for (let gy = -1; gy <= 1; gy++) {
-            const bucket = grid.get(`${Math.floor(seed.x / CELL) + gx},${Math.floor(seed.y / CELL) + gy}`)
-            if (!bucket) continue
-            for (const si of bucket) {
-              const s = samples[si]
-              if (Math.hypot(s.x - seed.x, s.y - seed.y) - s.r <= NET_TOL) {
-                hit = s.p
-                break
-              }
-            }
-            if (hit >= 0) break
-          }
-        // 回退：邻近图元样本未命中时，若种子点落在某铜箔(surface)内部，
-        // 则该铜箔即为此网（铺铜内部常无贴近边界的图元样本）。
-        if (hit < 0) {
-          for (let fi = 0; fi < layer.features.length; fi++) {
-            const f = layer.features[fi]
-            if (f.kind === 'surface' && pointInSurface(f, seed.x, seed.y)) {
-              hit = fi
-              break
-            }
-          }
-        }
-        if (hit >= 0) {
-          const comp = primToComp[hit]
-          if (!netToComps.has(seed.netref)) netToComps.set(seed.netref, new Set())
-          netToComps.get(seed.netref)!.add(comp)
-        }
-      }
-      // 组装最终 Net[]
-      const finalNets: Net[] = []
-      const consumed = new Set<number>()
-      let id = 0
-      for (const [netref, compSet] of netToComps) {
-        const idxs: number[] = []
-        for (const ci of compSet) {
-          consumed.add(ci)
-          idxs.push(...nets[ci].primitiveIdxs)
-        }
-        const name = netlist.netNames[netref] || `Net ${netref}`
-        finalNets.push({ id: id++, name, primitiveIdxs: idxs, explicit: true })
-      }
-      // 未被网表标注的连通分量 → 合成名
-      let synth = 1
-      nets.forEach((net, ci) => {
-        if (consumed.has(ci)) return
-        finalNets.push({ id: id++, name: `Net ${synth++}`, primitiveIdxs: net.primitiveIdxs, explicit: false })
-      })
-      finalNets.sort((a, b) => b.primitiveIdxs.length - a.primitiveIdxs.length)
-      layer.nets = finalNets
+      layer.nets = computeOdbNets(layer, netlist)
     }
     layers.push(layer)
   }
