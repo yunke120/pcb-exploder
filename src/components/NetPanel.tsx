@@ -5,11 +5,13 @@ interface Props {
   items: LayerItem[]
   mergedNets: MergedNet[]
   selected: Set<string>
+  /** 每个网络 key 对应的高亮颜色 */
+  colors: Record<string, string>
   onToggle: (key: string) => void
   onClear: () => void
 }
 
-export default function NetPanel({ items, mergedNets, selected, onToggle, onClear }: Props) {
+export default function NetPanel({ items, mergedNets, selected, colors, onToggle, onClear }: Props) {
   const [query, setQuery] = useState('')
 
   // 各层中“未命名（非显式）”的网络，仍按层单独展示
@@ -89,6 +91,11 @@ export default function NetPanel({ items, mergedNets, selected, onToggle, onClea
               return (
                 <label className="net-row" key={key}>
                   <input type="checkbox" checked={checked} onChange={() => onToggle(key)} />
+                  <span
+                    className="net-color"
+                    style={{ background: colors[key] ?? '#16f0ff' }}
+                    title="高亮颜色"
+                  />
                   <span className="net-name" title={m.members.map((mm) => mm.layerName).join('、')}>
                     {m.name}
                   </span>
@@ -117,6 +124,11 @@ export default function NetPanel({ items, mergedNets, selected, onToggle, onClea
               return (
                 <label className="net-row" key={key}>
                   <input type="checkbox" checked={checked} onChange={() => onToggle(key)} />
+                  <span
+                    className="net-color"
+                    style={{ background: colors[key] ?? '#16f0ff' }}
+                    title="高亮颜色"
+                  />
                   <span className="net-name">{net.name}</span>
                   <span className="net-sub">{net.primitiveIdxs.length}</span>
                 </label>
@@ -125,7 +137,7 @@ export default function NetPanel({ items, mergedNets, selected, onToggle, onClea
           </div>
         ))}
       </div>
-      <div className="net-hint">勾选网络后，对应铜层上将以高亮色描出该网络（同层与跨层同名网络一并高亮）</div>
+      <div className="net-hint">勾选网络后，对应铜层上将以各自专属颜色高亮该网络；不同网络使用不同颜色（同层也可叠加多个），跨层同名网络共享同一颜色</div>
     </div>
   )
 }

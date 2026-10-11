@@ -20,14 +20,14 @@ function LayerMesh({
   planeW,
   planeH,
   showLabel,
-  overlay,
+  overlayTextures,
 }: {
   item: LayerItem
   z: number
   planeW: number
   planeH: number
   showLabel: boolean
-  overlay?: import('three').Texture
+  overlayTextures?: import('three').Texture[]
 }) {
   const tex = item.texture!
   return (
@@ -53,9 +53,9 @@ function LayerMesh({
           depthWrite={false}
         />
       </mesh>
-      {/* 选中网络的高亮叠加层（青色） */}
-      {overlay && (
-        <mesh position={[0, 0, 0.002]}>
+      {/* 选中网络的高亮叠加层（每个网络一种颜色，叠加混合） */}
+      {overlayTextures?.map((overlay, i) => (
+        <mesh key={i} position={[0, 0, 0.002 + i * 0.0005]}>
           <planeGeometry args={[planeW, planeH]} />
           <meshBasicMaterial
             map={overlay}
@@ -66,7 +66,7 @@ function LayerMesh({
             toneMapped={false}
           />
         </mesh>
-      )}
+      ))}
       {showLabel && (
         <Html position={[-planeW / 2, planeH / 2 + 0.04, 0]} center={false}>
           <div
@@ -110,6 +110,9 @@ export default function ExplosionView({ items, aspect, explosion, showLabels, ov
       <directionalLight position={[2, 2, 3]} intensity={0.6} />
       {ordered.map((item, i) => {
         const z = (i - (n - 1) / 2) * spacing
+        const overlayTextures = Object.entries(overlays)
+          .filter(([k]) => k.startsWith(item.id + '::'))
+          .map(([, t]) => t)
         return (
           <LayerMesh
             key={item.id}
@@ -118,7 +121,7 @@ export default function ExplosionView({ items, aspect, explosion, showLabels, ov
             planeW={planeW}
             planeH={planeH}
             showLabel={showLabels}
-            overlay={overlays[item.id]}
+            overlayTextures={overlayTextures}
           />
         )
       })}

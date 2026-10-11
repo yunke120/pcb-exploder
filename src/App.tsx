@@ -49,6 +49,94 @@ export interface MergedNet {
 
 const ACCEPTED = /\.(gbr|gtl|gbl|gts|gbs|gto|gbo|gtp|gbp|gko|gm\d|gml|g\d|gp\d|in\d|drl|txt)$/i
 
+/** 预置的“优选”高亮色（深色背景 + 叠加混合下清晰可辨），优先用于前若干个网络 */
+const NET_PALETTE = [
+  '#ff5d8f', // 粉红
+  '#ffd166', // 金黄
+  '#06d6a0', // 青绿
+  '#4cc9f0', // 天蓝
+  '#b388ff', // 紫
+  '#ff9f1c', // 橙
+  '#f15bb5', // 品红
+  '#9ef01a', // 黄绿
+  '#ef476f', // 红
+  '#00bbf9', // 蓝
+  '#fb8500', // 琥珀
+  '#80ffdb', // 浅青
+  '#c1121f', // 深红
+  '#7ae582', // 绿
+  '#e0aaff', // 浅紫
+  '#ffadad', // 浅粉
+]
+
+/** FNV-1a 字符串哈希，用于把网络 key 稳定映射到配色槽位 */
+function hashStr(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+/** HSL → #RRGGBB（仅用于超出预置板时按需生成，保证色相均匀分布） */
+function hslToHex(h: number, s: number, l: number): string {
+  h = ((h % 360) + 360) % 360
+  s /= 100
+  l /= 100
+  const c = (1 - Math.abs(2 * l - 1)) * s
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = l - c / 2
+  let r = 0
+  let g = 0
+  let b = 0
+  if (h < 60) [r, g, b] = [c, x, 0]
+  else if (h < 120) [r, g, b] = [x, c, 0]
+  else if (h < 180) [r, g, b] = [0, c, x]
+  else if (h < 240) [r, g, b] = [0, x, c]
+  else if (h < 300) [r, g, b] = [x, 0, c]
+  else [r, g, b] = [c, 0, x]
+  const to = (v: number) =>
+    Math.round((v + m) * 255)
+      .toString(16)
+      .padStart(2, '0')
+  return `#${to(r)}${to(g)}${to(b)}`
+}
+
+/** 由槽位序号得到颜色：前若干用预置板，超出后用黄金角色相生成，确保互不相同 */
+function colorFromIndex(i: number): string {
+  if (i < NET_PALETTE.length) return NET_PALETTE[i]
+  const hue = ((i - NET_PALETTE.length) * 137.508) % 360
+  return hslToHex(hue, 90, 62)
+}
+
+/**
+ * 为当前选中的多个网络分配互不相同的颜色。
+ * 槽位数 = max(预置板长度, 选中数)，按哈希升序分配并线性探测避让，
+ * 并在颜色层面去重，保证“当前选中集内颜色互异”，且单个网络在增删其他网络时颜色尽量稳定。
+ */
+function assignNetColors(keys: string[]): Record<string, string> {
+  const size = Math.max(NET_PALETTE.length, keys.length, 1)
+  const withHash = keys.map((k) => ({ k, h: hashStr(k) }))
+  withHash.sort((a, b) => a.h - b.h)
+  const used = new Set<number>()
+  const usedColors = new Set<string>()
+  const res: Record<string, string> = {}
+  for (const { k, h } of withHash) {
+    let idx = h % size
+    let guard = 0
+    while ((used.has(idx) || usedColors.has(colorFromIndex(idx))) && guard <= size) {
+      idx = (idx + 1) % size
+      guard++
+    }
+    used.add(idx)
+    const col = colorFromIndex(idx)
+    usedColors.add(col)
+    res[k] = col
+  }
+  return res
+}
+
 interface RawEntry {
   name: string
   text: () => Promise<string>
@@ -124,7 +212,12 @@ export default function App() {
   // 网络高亮：选中的网络 key 集合（layerId::netId）与对应叠加纹理
   const [selectedNets, setSelectedNets] = useState<Set<string>>(new Set())
   const [netOverlays, setNetOverlays] = useState<Record<string, import('three').Texture>>({})
-  const HIGHLIGHT_COLOR = '#16f0ff'
+  /** 每个选中网络（key）对应的高亮颜色，保证互不相同 */
+  const netColors = useMemo<Record<string, string>>(
+    () => assignNetColors([...selectedNets]),
+    [selectedNets],
+  )
+  const FALLBACK_NET_COLOR = '#16f0ff'
 
   // 跨层合并：仅对“显式命名”的网络（ODB++ 真实网名）按名称归并；
   // Gerber 合成名（Net N）每层独立、不可合并，仍按层展示。
@@ -295,17 +388,16 @@ export default function App() {
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
   const hasRenderable = items.some((i) => i.texture)
 
-  // 选中网络变化时，渲染对应网络子集为叠加纹理（与底层同坐标系对齐）。
+  // 选中网络变化时，为每个网络渲染一张专属颜色的高亮叠加纹理。
+  // 叠加纹理的 key 为 `${layerId}::${netKey}`，从而同一层可同时显示多个不同颜色的高亮。
   // Gerber 走 gerber-to-svg 子集；ODB++ 走 renderOdbToTexture 子集。
   useEffect(() => {
     let cancelled = false
     async function run() {
-      const byLayer = new Map<string, Net[]>()
-      const pushOne = (layerId: string, net: Net) => {
-        if (!byLayer.has(layerId)) byLayer.set(layerId, [])
-        byLayer.get(layerId)!.push(net)
-      }
+      type Req = { oKey: string; layerId: string; net: Net; color: string }
+      const requests: Req[] = []
       for (const key of selectedNets) {
+        const color = netColors[key] ?? FALLBACK_NET_COLOR
         if (key.includes('::')) {
           // 非显式（Gerber 合成）网络：单层单网
           const sep = key.indexOf('::')
@@ -313,18 +405,19 @@ export default function App() {
           const netId = Number(key.slice(sep + 2))
           const layer = itemsRef.current.find((i) => i.id === layerId)
           const net = layer?.nets?.find((n) => n.id === netId)
-          if (net) pushOne(layerId, net)
+          if (net) requests.push({ oKey: `${layerId}::${key}`, layerId, net, color })
         } else {
-          // 显式网络：按名称展开到所有含该网的铜层
+          // 显式网络：按名称展开到所有含该网的铜层，但整体共享同一颜色
           for (const layer of itemsRef.current) {
             if (!layer.nets) continue
             for (const net of layer.nets) {
-              if (net.explicit && net.name === key) pushOne(layer.id, net)
+              if (net.explicit && net.name === key)
+                requests.push({ oKey: `${layer.id}::${key}`, layerId: layer.id, net, color })
             }
           }
         }
       }
-      if (byLayer.size === 0) {
+      if (requests.length === 0) {
         setNetOverlays((prev) => {
           Object.values(prev).forEach((t) => t.dispose())
           return {}
@@ -336,22 +429,20 @@ export default function App() {
         computeGlobalBox(itemsRef.current.filter((i) => i.vb).map((i) => i.vb!))
       const asp = aspect || 1
       const out: Record<string, import('three').Texture> = {}
-      for (const [layerId, nets] of byLayer) {
-        const layer = itemsRef.current.find((i) => i.id === layerId)
+      for (const r of requests) {
+        const layer = itemsRef.current.find((i) => i.id === r.layerId)
         if (!layer?.vb) continue
-        const idxs: number[] = []
-        for (const n of nets) idxs.push(...n.primitiveIdxs)
         try {
           let tex: import('three').Texture
           if (layer.odb) {
-            tex = renderOdbToTexture(layer.odb, g, asp, HIGHLIGHT_COLOR, new Set(idxs))
+            tex = renderOdbToTexture(layer.odb, g, asp, r.color, new Set(r.net.primitiveIdxs))
           } else if (layer.parsed) {
-            const subset = buildSubset(layer.parsed, idxs)
+            const subset = buildSubset(layer.parsed, r.net.primitiveIdxs)
             const svg = await parseGerberToSvg(subset)
             const svgVb = withViewBox(svg, layer.vb)
-            tex = await renderLayerTexture(svgVb, layer.vb, g, asp, HIGHLIGHT_COLOR)
+            tex = await renderLayerTexture(svgVb, layer.vb, g, asp, r.color)
           } else continue
-          out[layerId] = tex
+          out[r.oKey] = tex
         } catch (e) {
           console.warn('网络高亮渲染失败:', layer.name, e)
         }
@@ -369,7 +460,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [selectedNets, items, aspect])
+  }, [selectedNets, netColors, items, aspect])
 
   return (
     <div className="app">
@@ -398,6 +489,7 @@ export default function App() {
           items={items}
           mergedNets={mergedNets}
           selected={selectedNets}
+          colors={netColors}
           onToggle={(key: string) =>
             setSelectedNets((prev) => {
               const next = new Set(prev)
