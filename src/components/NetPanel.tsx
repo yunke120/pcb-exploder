@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { LayerItem, MergedNet } from '../App'
+import type { SpacingResult } from '../lib/spacing'
 
 interface Props {
   items: LayerItem[]
@@ -9,9 +10,23 @@ interface Props {
   colors: Record<string, string>
   onToggle: (key: string) => void
   onClear: () => void
+  onComputeSpacing: () => void
+  spacingResults: SpacingResult[]
+  /** 是否已执行过间距计算（用于区分「未计算」与「计算后无共同层」） */
+  spacingComputed: boolean
 }
 
-export default function NetPanel({ items, mergedNets, selected, colors, onToggle, onClear }: Props) {
+export default function NetPanel({
+  items,
+  mergedNets,
+  selected,
+  colors,
+  onToggle,
+  onClear,
+  onComputeSpacing,
+  spacingResults,
+  spacingComputed,
+}: Props) {
   const [query, setQuery] = useState('')
 
   // 各层中“未命名（非显式）”的网络，仍按层单独展示
@@ -137,7 +152,38 @@ export default function NetPanel({ items, mergedNets, selected, colors, onToggle
           </div>
         ))}
       </div>
+
+      {selected.size === 2 && (
+        <div className="spacing-box">
+          <button className="btn primary spacing-btn" onClick={onComputeSpacing}>
+            计算最小间距
+          </button>
+          {spacingResults.length > 0 ? (
+            <ul className="spacing-list">
+              {spacingResults.map((r) => (
+                <li key={r.layerId}>
+                  <span className="spacing-layer">{r.layerName}</span>
+                  <span className="spacing-dist">{formatMm(r.distance)} mm</span>
+                </li>
+              ))}
+            </ul>
+          ) : spacingComputed ? (
+            <div className="spacing-empty">两网络无共同出现的层</div>
+          ) : (
+            <div className="spacing-hint">
+              勾选 2 个网络后点击计算，将自动求两网在每一层的最小间距（仅两网同时出现的层），并在图中标注最近点。
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="net-hint">勾选网络后，对应铜层上将以各自专属颜色高亮该网络；不同网络使用不同颜色（同层也可叠加多个），跨层同名网络共享同一颜色</div>
     </div>
   )
+}
+
+function formatMm(v: number): string {
+  if (v >= 100) return v.toFixed(1)
+  if (v >= 1) return v.toFixed(2)
+  return v.toFixed(3)
 }

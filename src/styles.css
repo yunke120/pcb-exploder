@@ -213,3 +213,23 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 }
 .net-sub { font-size: 11px; color: var(--ink-soft); min-width: 26px; text-align: right; }
 .net-hint { font-size: 11px; color: var(--ink-soft); opacity: 0.8; margin-top: 8px; line-height: 1.5; }
+
+/* 双网络最小间距计算 */
+.spacing-box { margin-top: 10px; }
+.spacing-btn { width: 100%; }
+.spacing-list {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  max-height: 150px; overflow-y: auto;
+}
+.spacing-list li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 5px; font-size: 12.5px;
+}
+.spacing-list li:nth-child(odd) { background: var(--paper-2); }
+.spacing-layer { flex: 1; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spacing-dist {
+  font-family: "Menlo", "Consolas", monospace; font-weight: 600;
+  color: var(--accent); white-space: nowrap;
+}
+.spacing-empty { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
+.spacing-hint { font-size: 11px; color: var(--ink-soft); opacity: 0.8; margin-top: 6px; line-height: 1.5; }

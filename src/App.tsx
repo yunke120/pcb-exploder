@@ -17,6 +17,7 @@ import {
 import { parseGerber, buildSubset, type ParsedLayer } from './lib/gerberParse'
 import { computeNets, type Net } from './lib/nets'
 import { parseOdb, renderOdbToTexture, type OdbLayer, type FileEntry } from './lib/odb'
+import { minSpacing, odbNetShapes, gerberNetShapes, type SpacingResult } from './lib/spacing'
 
 export interface LayerItem {
   id: string
@@ -45,6 +46,16 @@ export interface MergedNet {
   members: MergedNetMember[]
   /** 跨层图元总数，用于排序与展示 */
   totalCount: number
+}
+
+/** 用于 3D 视图中标注最小间距的结果（含两网络各自的颜色） */
+export interface SpacingMark {
+  layerId: string
+  distance: number
+  pA: [number, number]
+  pB: [number, number]
+  colorA: string
+  colorB: string
 }
 
 const ACCEPTED = /\.(gbr|gtl|gbl|gts|gbs|gto|gbo|gtp|gbp|gko|gm\d|gml|g\d|gp\d|in\d|drl|txt)$/i
@@ -137,12 +148,37 @@ function assignNetColors(keys: string[]): Record<string, string> {
   return res
 }
 
+/**
+ * 将选中的网络 key 解析为若干 {layer, net} 实例。
+ * 显式网络名（如 AGND）会展开到所有含该名的铜层；非显式（Gerber 合成）仅单层单网。
+ */
+function resolveSelectedKey(
+  key: string,
+  items: LayerItem[],
+): { layer: LayerItem; net: Net }[] {
+  const out: { layer: LayerItem; net: Net }[] = []
+  if (key.includes('::')) {
+    const sep = key.indexOf('::')
+    const layerId = key.slice(0, sep)
+    const netId = Number(key.slice(sep + 2))
+    const layer = items.find((i) => i.id === layerId)
+    const net = layer?.nets?.find((n) => n.id === netId)
+    if (layer && net) out.push({ layer, net })
+  } else {
+    for (const layer of items) {
+      if (!layer.nets) continue
+      for (const net of layer.nets) {
+        if (net.explicit && net.name === key) out.push({ layer, net })
+      }
+    }
+  }
+  return out
+}
+
 interface RawEntry {
   name: string
   text: () => Promise<string>
-}
-
-async function gatherEntries(files: File[]): Promise<RawEntry[]> {
+}async function gatherEntries(files: File[]): Promise<RawEntry[]> {
   const entries: RawEntry[] = []
   for (const f of files) {
     if (/\.zip$/i.test(f.name)) {
@@ -218,6 +254,72 @@ export default function App() {
     [selectedNets],
   )
   const FALLBACK_NET_COLOR = '#16f0ff'
+
+  // 最小间距计算：仅当恰好选中 2 个网络时有效。
+  // spacingPair 记录产生当前结果的两个网络 key（用于取各自高亮色）。
+  const [spacingResults, setSpacingResults] = useState<SpacingResult[]>([])
+  const [spacingPair, setSpacingPair] = useState<[string, string] | null>(null)
+
+  // 选中数不是 2 时清空旧结果（避免残留标注）
+  useEffect(() => {
+    if (selectedNets.size !== 2) {
+      setSpacingResults([])
+      setSpacingPair(null)
+    }
+  }, [selectedNets])
+
+  /** 计算两个选中网络在每一层（两网同时存在）的最小间距 */
+  const computeSpacing = useCallback(() => {
+    if (selectedNets.size !== 2) return
+    const keys = [...selectedNets]
+    const listA = resolveSelectedKey(keys[0], itemsRef.current)
+    const listB = resolveSelectedKey(keys[1], itemsRef.current)
+    const results: SpacingResult[] = []
+    for (const layer of itemsRef.current) {
+      if (!layer.nets) continue
+      const na = listA.find((m) => m.layer.id === layer.id)
+      const nb = listB.find((m) => m.layer.id === layer.id)
+      if (!na || !nb) continue // 该层只有其中一个网络 → 不计算
+      const shapesA = layer.odb
+        ? odbNetShapes(layer.odb, na.net)
+        : layer.parsed
+          ? gerberNetShapes(layer.parsed, na.net)
+          : []
+      const shapesB = layer.odb
+        ? odbNetShapes(layer.odb, nb.net)
+        : layer.parsed
+          ? gerberNetShapes(layer.parsed, nb.net)
+          : []
+      if (shapesA.length === 0 || shapesB.length === 0) continue
+      const r = minSpacing(shapesA, shapesB)
+      if (r)
+        results.push({
+          layerId: layer.id,
+          layerName: layer.meta.name,
+          distance: r.distance,
+          pA: r.pA,
+          pB: r.pB,
+        })
+    }
+    results.sort((a, b) => a.distance - b.distance)
+    setSpacingResults(results)
+    setSpacingPair([keys[0], keys[1]])
+  }, [selectedNets])
+
+  // 给 3D 视图的标注附上两网络各自的高亮色
+  const spacingMarks = useMemo<SpacingMark[]>(() => {
+    if (!spacingPair || spacingResults.length === 0) return []
+    const colorA = netColors[spacingPair[0]] ?? FALLBACK_NET_COLOR
+    const colorB = netColors[spacingPair[1]] ?? FALLBACK_NET_COLOR
+    return spacingResults.map((r) => ({
+      layerId: r.layerId,
+      distance: r.distance,
+      pA: r.pA,
+      pB: r.pB,
+      colorA,
+      colorB,
+    }))
+  }, [spacingResults, spacingPair, netColors])
 
   // 跨层合并：仅对“显式命名”的网络（ODB++ 真实网名）按名称归并；
   // Gerber 合成名（Net N）每层独立、不可合并，仍按层展示。
@@ -499,6 +601,9 @@ export default function App() {
             })
           }
           onClear={() => setSelectedNets(new Set())}
+          onComputeSpacing={computeSpacing}
+          spacingResults={spacingResults}
+          spacingComputed={spacingPair != null}
         />
       </aside>
 
@@ -510,6 +615,8 @@ export default function App() {
             explosion={explosion}
             showLabels={showLabels}
             overlays={netOverlays}
+            g={gbRef.current ?? undefined}
+            marks={spacingMarks}
           />
         ) : (
           <div className="empty-hint">
