@@ -125,14 +125,13 @@ function SpacingMarker({
   const my = (a.y + b.y) / 2
   const len = Math.hypot(b.x - a.x, b.y - a.y)
   const ang = Math.atan2(b.y - a.y, b.x - a.x)
-  const zz = z + 0.008
-  const dotR = 0.012
+  const zz = z + 0.003
   return (
     <group>
       {/* 最近点连线（亮红色细线，贴合所在层） */}
       {len > 1e-6 && (
         <mesh position={[mx, my, zz]} rotation={[0, 0, ang]}>
-          <planeGeometry args={[len, 0.003]} />
+          <planeGeometry args={[len, 0.0012]} />
           <meshBasicMaterial
             color="#ff2b2b"
             transparent
@@ -143,24 +142,6 @@ function SpacingMarker({
           />
         </mesh>
       )}
-      {/* 端点圆点（白边 + 各自网络色） */}
-      {([a, b] as const).map((p, i) => (
-        <group key={i} position={[p.x, p.y, zz]}>
-          <mesh>
-            <circleGeometry args={[dotR + 0.006, 24]} />
-            <meshBasicMaterial color="#ffffff" depthTest={false} toneMapped={false} side={THREE.DoubleSide} />
-          </mesh>
-          <mesh position={[0, 0, 0.001]}>
-            <circleGeometry args={[dotR, 24]} />
-            <meshBasicMaterial
-              color={i === 0 ? mark.colorA : mark.colorB}
-              depthTest={false}
-              toneMapped={false}
-              side={THREE.DoubleSide}
-            />
-          </mesh>
-        </group>
-      ))}
       {/* 距离标签 */}
       <Html position={[mx, my, zz + 0.02]} center>
         <div
