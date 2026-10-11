@@ -45,6 +45,19 @@ export function parseGerberToSvg(text: string): Promise<string> {
   })
 }
 
+/**
+ * 强制把 SVG 的 viewBox 改写为指定值。
+ * 高亮叠加层用：把"网络子集"的 SVG 强行映射到完整图层的 viewBox，
+ * 这样叠加纹理与底层纹理使用同一坐标系，位置天然对齐。
+ */
+export function withViewBox(svg: string, vb: ViewBox): string {
+  const vbStr = `${vb.minX} ${vb.minY} ${vb.w} ${vb.h}`
+  if (/viewBox="[^"]*"/.test(svg)) {
+    return svg.replace(/viewBox="[^"]*"/, `viewBox="${vbStr}"`)
+  }
+  return svg.replace(/(<svg[^>]*)/, `$1 viewBox="${vbStr}"`)
+}
+
 /** 解析 SVG 的 viewBox（1000×Gerber 单位） */
 export function getViewBox(svg: string): ViewBox {
   const m = svg.match(/viewBox="([-\d.\s]+)"/)

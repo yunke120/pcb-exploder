@@ -9,6 +9,7 @@ interface Props {
   aspect: number
   explosion: number
   showLabels: boolean
+  overlays: Record<string, import('three').Texture>
 }
 
 const BASE_SPACING = 0.07
@@ -19,12 +20,14 @@ function LayerMesh({
   planeW,
   planeH,
   showLabel,
+  overlay,
 }: {
   item: LayerItem
   z: number
   planeW: number
   planeH: number
   showLabel: boolean
+  overlay?: import('three').Texture
 }) {
   const tex = item.texture!
   return (
@@ -50,6 +53,20 @@ function LayerMesh({
           depthWrite={false}
         />
       </mesh>
+      {/* 选中网络的高亮叠加层（青色） */}
+      {overlay && (
+        <mesh position={[0, 0, 0.002]}>
+          <planeGeometry args={[planeW, planeH]} />
+          <meshBasicMaterial
+            map={overlay}
+            transparent
+            side={THREE.DoubleSide}
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+            toneMapped={false}
+          />
+        </mesh>
+      )}
       {showLabel && (
         <Html position={[-planeW / 2, planeH / 2 + 0.04, 0]} center={false}>
           <div
@@ -72,7 +89,7 @@ function LayerMesh({
   )
 }
 
-export default function ExplosionView({ items, aspect, explosion, showLabels }: Props) {
+export default function ExplosionView({ items, aspect, explosion, showLabels, overlays }: Props) {
   const planeW = aspect >= 1 ? 1 : aspect
   const planeH = aspect >= 1 ? 1 / aspect : 1
 
@@ -101,6 +118,7 @@ export default function ExplosionView({ items, aspect, explosion, showLabels }: 
             planeW={planeW}
             planeH={planeH}
             showLabel={showLabels}
+            overlay={overlays[item.id]}
           />
         )
       })}

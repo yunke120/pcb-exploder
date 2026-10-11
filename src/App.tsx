@@ -1,7 +1,8 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
 import DropZone from './components/DropZone'
 import LayerPanel from './components/LayerPanel'
+import NetPanel from './components/NetPanel'
 import ExplosionView from './components/ExplosionView'
 import { identifyLayer, type LayerMeta } from './lib/layers'
 import {
@@ -9,9 +10,12 @@ import {
   getViewBox,
   computeGlobalBox,
   renderLayerTexture,
+  withViewBox,
   type ViewBox,
   type GlobalBox,
 } from './lib/gerber'
+import { parseGerber, buildSubset, type ParsedLayer } from './lib/gerberParse'
+import { computeNets, type Net } from './lib/nets'
 
 export interface LayerItem {
   id: string
@@ -20,6 +24,10 @@ export interface LayerItem {
   svg?: string
   vb?: ViewBox
   texture?: import('three').Texture
+  /** Gerber 解析结果（图元 + 块索引），用于网络高亮 */
+  parsed?: ParsedLayer
+  /** 该层识别出的网络列表 */
+  nets?: Net[]
 }
 
 const ACCEPTED = /\.(gbr|gtl|gbl|gts|gbs|gto|gbo|gtp|gbp|gko|gm\d|gml|g\d|gp\d|in\d|drl|txt)$/i
@@ -56,6 +64,10 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const itemsRef = useRef<LayerItem[]>([])
+  // 网络高亮：选中的网络 key 集合（layerId::netId）与对应叠加纹理
+  const [selectedNets, setSelectedNets] = useState<Set<string>>(new Set())
+  const [netOverlays, setNetOverlays] = useState<Record<string, import('three').Texture>>({})
+  const HIGHLIGHT_COLOR = '#16f0ff'
 
   const handleFiles = useCallback(async (files: File[]) => {
     setBusy(true)
@@ -74,8 +86,10 @@ export default function App() {
         meta: identifyLayer(e.name),
       }))
 
-      // 仅对可渲染平面层解析 SVG
+      // 仅对可渲染平面层解析 SVG；铜层额外解析图元用于网络高亮
       const renderables = parsed.filter((p) => p.meta.renderable)
+      const isCopper = (k: string) =>
+        k === 'topCopper' || k === 'bottomCopper' || k === 'innerCopper'
       await Promise.all(
         renderables.map(async (p) => {
           const entry = entries[parsed.indexOf(p)]
@@ -83,7 +97,13 @@ export default function App() {
             const text = await entry.text()
             const svg = await parseGerberToSvg(text)
             const vb = getViewBox(svg)
-            parsed[parsed.indexOf(p)] = { ...parsed[parsed.indexOf(p)], svg, vb }
+            const patch: Partial<LayerItem> = { svg, vb }
+            if (isCopper(p.meta.kind)) {
+              const parsedLayer = parseGerber(text)
+              patch.parsed = parsedLayer
+              patch.nets = computeNets(parsedLayer)
+            }
+            parsed[parsed.indexOf(p)] = { ...parsed[parsed.indexOf(p)], ...patch }
           } catch (err) {
             console.warn('图层解析失败:', p.name, err)
           }
@@ -139,6 +159,57 @@ export default function App() {
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
   const hasRenderable = items.some((i) => i.texture)
 
+  // 选中网络变化时，复用 gerber-to-svg 渲染该网络子集为叠加纹理（与底层同坐标系对齐）
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      const byLayer = new Map<string, Net[]>()
+      for (const key of selectedNets) {
+        const sep = key.indexOf('::')
+        const layerId = key.slice(0, sep)
+        const netId = Number(key.slice(sep + 2))
+        const layer = itemsRef.current.find((i) => i.id === layerId)
+        if (!layer?.parsed || !layer.nets) continue
+        const net = layer.nets.find((n) => n.id === netId)
+        if (!net) continue
+        if (!byLayer.has(layerId)) byLayer.set(layerId, [])
+        byLayer.get(layerId)!.push(net)
+      }
+      const g: GlobalBox = computeGlobalBox(
+        itemsRef.current.filter((i) => i.vb).map((i) => i.vb!),
+      )
+      const asp = aspect || 1
+      const out: Record<string, import('three').Texture> = {}
+      for (const [layerId, nets] of byLayer) {
+        const layer = itemsRef.current.find((i) => i.id === layerId)
+        if (!layer?.vb || !layer.parsed) continue
+        const idxs: number[] = []
+        for (const n of nets) idxs.push(...n.primitiveIdxs)
+        const subset = buildSubset(layer.parsed, idxs)
+        try {
+          const svg = await parseGerberToSvg(subset)
+          const svgVb = withViewBox(svg, layer.vb)
+          const tex = await renderLayerTexture(svgVb, layer.vb, g, asp, HIGHLIGHT_COLOR)
+          out[layerId] = tex
+        } catch (e) {
+          console.warn('网络高亮渲染失败:', layer.name, e)
+        }
+      }
+      if (cancelled) {
+        Object.values(out).forEach((t) => t.dispose())
+        return
+      }
+      setNetOverlays((prev) => {
+        Object.values(prev).forEach((t) => t.dispose())
+        return out
+      })
+    }
+    run()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedNets, items, aspect])
+
   return (
     <div className="app">
       <header className="header">
@@ -162,6 +233,19 @@ export default function App() {
           showLabels={showLabels}
           setShowLabels={setShowLabels}
         />
+        <NetPanel
+          items={items}
+          selected={selectedNets}
+          onToggle={(key: string) =>
+            setSelectedNets((prev) => {
+              const next = new Set(prev)
+              if (next.has(key)) next.delete(key)
+              else next.add(key)
+              return next
+            })
+          }
+          onClear={() => setSelectedNets(new Set())}
+        />
       </aside>
 
       <main className="main">
@@ -171,6 +255,7 @@ export default function App() {
             aspect={aspect}
             explosion={explosion}
             showLabels={showLabels}
+            overlays={netOverlays}
           />
         ) : (
           <div className="empty-hint">
