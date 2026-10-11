@@ -16,6 +16,27 @@ const INCH_TO_MM = 25.4
 const MIL_TO_MM = 0.0254
 const NET_TOL = 0.15 // mm，连通容差
 
+// ODB++ 网表（netlist）常为 GBK 编码，浏览器默认按 UTF-8 读取会产生乱码。
+// 这里先按 UTF-8 严格解码；若字节序列非法（即并非 UTF-8，很可能是 GBK），
+// 再改用 GBK 解码。清单/features 等纯 ASCII 文件不受影响。
+const utf8Strict = new TextDecoder('utf-8', { fatal: true })
+const utf8Loose = new TextDecoder('utf-8')
+const gbkdec = (() => {
+  try {
+    return new TextDecoder('gbk')
+  } catch {
+    return null
+  }
+})()
+function decodeText(bytes: Uint8Array): string {
+  try {
+    return utf8Strict.decode(bytes)
+  } catch {
+    if (gbkdec) return gbkdec.decode(bytes)
+    return utf8Loose.decode(bytes)
+  }
+}
+
 // ---------- 类型 ----------
 export type OdbSymKind = 'rect' | 'round' | 'oval' | 'oct' | 'donut' | 'square' | 'unknown'
 export interface OdbSymbol {
@@ -65,7 +86,7 @@ export interface OdbDesign {
 
 export interface FileEntry {
   path: string
-  text: () => Promise<string>
+  bytes: () => Promise<Uint8Array>
 }
 
 // ---------- 符号解析 ----------
@@ -528,15 +549,15 @@ export async function parseOdb(entries: FileEntry[]): Promise<OdbDesign> {
   const netlistEntry = findFirst(/\/netlists\/[^/]+\/netlist$/)
   const profileEntry = find(`${step}/profile`)
 
-  const matrix = parseMatrix(await matrixEntry.text())
-  const netlist = netlistEntry ? parseNetlist(await netlistEntry.text()) : { netNames: [], seeds: [] }
-  const profile = profileEntry ? parseProfile(await profileEntry.text()) : undefined
+  const matrix = parseMatrix(decodeText(await matrixEntry.bytes()))
+  const netlist = netlistEntry ? parseNetlist(decodeText(await netlistEntry.bytes())) : { netNames: [], seeds: [] }
+  const profile = profileEntry ? parseProfile(decodeText(await profileEntry.bytes())) : undefined
 
   const layers: OdbLayer[] = []
   for (const ml of matrix) {
     const fe = layerFeatures(ml.name)
     if (!fe) continue
-    const parsed = parseFeatures(await fe.text())
+    const parsed = parseFeatures(decodeText(await fe.bytes()))
     const meta = odbMeta(ml.type, ml.name, ml.row, ml.polarity)
     const layer: OdbLayer = {
       name: ml.name,

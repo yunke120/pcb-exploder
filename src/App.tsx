@@ -84,10 +84,14 @@ async function toOdbEntries(dropped: DroppedItem[]): Promise<FileEntry[]> {
     if (/\.zip$/i.test(d.file.name)) {
       const zip = await JSZip.loadAsync(await d.file.arrayBuffer())
       zip.forEach((path, entry) => {
-        if (!entry.dir) entries.push({ path: path.replace(/\\/g, '/'), text: () => entry.async('string') })
+        if (!entry.dir)
+          entries.push({ path: path.replace(/\\/g, '/'), bytes: () => entry.async('uint8array') })
       })
     } else {
-      entries.push({ path: d.path.replace(/\\/g, '/'), text: () => d.file.text() })
+      entries.push({
+        path: d.path.replace(/\\/g, '/'),
+        bytes: () => d.file.arrayBuffer().then((b) => new Uint8Array(b)),
+      })
     }
   }
   return entries
