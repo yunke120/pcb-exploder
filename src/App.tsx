@@ -491,23 +491,27 @@ export default function App() {
     })
   }, [])
 
-  // 导出当前勾选（可见）的可渲染图层为 PDF
+  // 导出当前勾选（可见）的可渲染图层为矢量 PDF
   const exportPdf = useCallback(
     (layout: PdfLayout) => {
       const renderable = itemsRef.current
         .filter((i) => i.texture && visible.has(i.id))
         .sort((a, b) => a.meta.order - b.meta.order)
       if (renderable.length === 0) return
+      const g = gbRef.current
+      if (!g) return
       const layers: PdfLayer[] = renderable.map((i) => ({
         name: i.meta.name,
-        canvas: i.texture!.image as HTMLCanvasElement,
+        color: i.meta.color,
+        svg: i.svg,
+        odb: i.odb,
       }))
-      exportLayersPdf(layers, { aspect: aspect || 1, layout, title: 'PCB 图层' }).catch((e) => {
+      exportLayersPdf(layers, { g, layout, title: 'PCB 图层' }).catch((e) => {
         console.error('PDF 导出失败:', e)
         setError('PDF 导出失败：' + (e as Error).message)
       })
     },
-    [aspect, visible],
+    [visible],
   )
 
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
