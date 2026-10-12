@@ -79,7 +79,7 @@ export default function LayerPanel({
 
       <div className="section">
         <h2>平面图层 ({renderable.length})</h2>
-        {renderable.length === 0 && <div className="meta">尚未导入可渲染的 Gerber 层</div>}
+        {renderable.length === 0 && <div className="meta">尚未导入可渲染的 ODB++ 层</div>}
         {renderable.map((i) => (
           <div className="layer-row" key={i.id}>
             <input type="checkbox" checked={visible.has(i.id)} onChange={() => onToggle(i.id)} />

@@ -3,7 +3,7 @@ import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Html } from '@react-three/drei'
 import * as THREE from 'three'
 import type { LayerItem, SpacingMark } from '../App'
-import type { GlobalBox } from '../lib/gerber'
+import type { GlobalBox } from '../lib/geometry'
 
 interface Props {
   items: LayerItem[]
@@ -102,7 +102,7 @@ function LayerMesh({
           depthWrite={false}
         />
       </mesh>
-      {/* 着色后的 Gerber 纹理 */}
+      {/* 着色后的图层纹理 */}
       <mesh position={[0, 0, 0.001]}>
         <planeGeometry args={[planeW, planeH]} />
         <meshBasicMaterial

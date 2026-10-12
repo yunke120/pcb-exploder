@@ -6,31 +6,19 @@ import NetPanel from './components/NetPanel'
 import ExplosionView from './components/ExplosionView'
 import ExportPanel from './components/ExportPanel'
 import { exportLayersPdf, type PdfLayout, type PdfLayer } from './lib/pdfExport'
-import { identifyLayer, type LayerMeta } from './lib/layers'
-import {
-  parseGerberToSvg,
-  getViewBox,
-  computeGlobalBox,
-  renderLayerTexture,
-  withViewBox,
-  type ViewBox,
-  type GlobalBox,
-} from './lib/gerber'
-import { parseGerber, buildSubset, type ParsedLayer } from './lib/gerberParse'
-import { computeNets, type Net } from './lib/nets'
+import { type LayerMeta } from './lib/layers'
+import { computeGlobalBox, type ViewBox, type GlobalBox } from './lib/geometry'
+import { type Net } from './lib/nets'
 import { parseOdb, renderOdbToTexture, type OdbLayer, type FileEntry } from './lib/odb'
-import { minSpacing, odbNetShapes, gerberNetShapes, type SpacingResult } from './lib/spacing'
+import { minSpacing, odbNetShapes, type SpacingResult } from './lib/spacing'
 
 export interface LayerItem {
   id: string
   name: string
   meta: LayerMeta
-  svg?: string
   vb?: ViewBox
   texture?: import('three').Texture
-  /** Gerber 解析结果（图元 + 块索引），用于网络高亮 */
-  parsed?: ParsedLayer
-  /** ODB++ 解析结果（图元 + 符号），用于网络高亮 */
+  /** ODB++ 解析结果（图元 + 符号），用于网络高亮与 PDF 导出 */
   odb?: OdbLayer
   /** 该层识别出的网络列表 */
   nets?: Net[]
@@ -59,8 +47,6 @@ export interface SpacingMark {
   colorA: string
   colorB: string
 }
-
-const ACCEPTED = /\.(gbr|gtl|gbl|gts|gbs|gto|gbo|gtp|gbp|gko|gm\d|gml|g\d|gp\d|in\d|drl|txt)$/i
 
 /** 预置的“优选”高亮色（深色背景 + 叠加混合下清晰可辨），优先用于前若干个网络 */
 const NET_PALETTE = [
@@ -152,7 +138,7 @@ function assignNetColors(keys: string[]): Record<string, string> {
 
 /**
  * 将选中的网络 key 解析为若干 {layer, net} 实例。
- * 显式网络名（如 AGND）会展开到所有含该名的铜层；非显式（Gerber 合成）仅单层单网。
+ * 显式网络名（如 AGND）会展开到所有含该名的铜层；非显式（合成 Net N）仅单层单网。
  */
 function resolveSelectedKey(
   key: string,
@@ -175,46 +161,6 @@ function resolveSelectedKey(
     }
   }
   return out
-}
-
-interface RawEntry {
-  name: string
-  text: () => Promise<string>
-}async function gatherEntries(files: File[]): Promise<RawEntry[]> {
-  const entries: RawEntry[] = []
-  for (const f of files) {
-    if (/\.zip$/i.test(f.name)) {
-      const zip = await JSZip.loadAsync(await f.arrayBuffer())
-      zip.forEach((path, entry) => {
-        if (!entry.dir && ACCEPTED.test(path)) {
-          const name = path.split('/').pop() || path
-          entries.push({ name, text: () => entry.async('string') })
-        }
-      })
-    } else if (ACCEPTED.test(f.name)) {
-      entries.push({ name: f.name, text: () => f.text() })
-    }
-  }
-  return entries
-}
-
-/** 探测拖入内容是否包含 ODB++（文件夹树或 zip 内含 matrix/matrix） */
-async function detectOdb(dropped: DroppedItem[]): Promise<boolean> {
-  const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase()
-  for (const d of dropped) {
-    if (/matrix\/matrix$/.test(norm(d.file.name)) || /matrix\/matrix$/.test(norm(d.path))) return true
-    if (/\.zip$/i.test(d.file.name)) {
-      try {
-        const zip = await JSZip.loadAsync(await d.file.arrayBuffer())
-        for (const rel of Object.keys(zip.files)) {
-          if (/(^|\/)matrix\/matrix$/.test(norm(rel))) return true
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return false
 }
 
 /** 将拖入项（文件夹树或 zip）整理成 ODB++ 所需的 FileEntry[] */
@@ -260,7 +206,6 @@ export default function App() {
   const FALLBACK_NET_COLOR = '#16f0ff'
 
   // 最小间距计算：仅当恰好选中 2 个网络时有效。
-  // spacingPair 记录产生当前结果的两个网络 key（用于取各自高亮色）。
   const [spacingResults, setSpacingResults] = useState<SpacingResult[]>([])
   const [spacingPair, setSpacingPair] = useState<[string, string] | null>(null)
 
@@ -284,16 +229,8 @@ export default function App() {
       const na = listA.find((m) => m.layer.id === layer.id)
       const nb = listB.find((m) => m.layer.id === layer.id)
       if (!na || !nb) continue // 该层只有其中一个网络 → 不计算
-      const shapesA = layer.odb
-        ? odbNetShapes(layer.odb, na.net)
-        : layer.parsed
-          ? gerberNetShapes(layer.parsed, na.net)
-          : []
-      const shapesB = layer.odb
-        ? odbNetShapes(layer.odb, nb.net)
-        : layer.parsed
-          ? gerberNetShapes(layer.parsed, nb.net)
-          : []
+      const shapesA = layer.odb ? odbNetShapes(layer.odb, na.net) : []
+      const shapesB = layer.odb ? odbNetShapes(layer.odb, nb.net) : []
       if (shapesA.length === 0 || shapesB.length === 0) continue
       const r = minSpacing(shapesA, shapesB)
       if (r)
@@ -325,8 +262,7 @@ export default function App() {
     }))
   }, [spacingResults, spacingPair, netColors])
 
-  // 跨层合并：仅对“显式命名”的网络（ODB++ 真实网名）按名称归并；
-  // Gerber 合成名（Net N）每层独立、不可合并，仍按层展示。
+  // 跨层合并：仅对“显式命名”的网络按名称归并；合成名（Net N）每层独立、不可合并。
   const mergedNets = useMemo<MergedNet[]>(() => {
     const byName = new Map<string, MergedNet>()
     for (const layer of items) {
@@ -350,14 +286,13 @@ export default function App() {
     return [...byName.values()].sort((a, b) => b.totalCount - a.totalCount)
   }, [items])
 
-  // ---- ODB++ 分支 ----
+  // ---- ODB++ 解析 ----
   const handleOdb = useCallback(async (dropped: DroppedItem[]) => {
     const entries = await toOdbEntries(dropped)
     const design = await parseOdb(entries)
     const renderable = design.layers.filter((l) => l.meta.renderable && l.features.length > 0)
     if (renderable.length === 0) {
       setError('ODB++ 未解析出可渲染图层，请确认目录结构包含 steps/<step>/layers/<name>/features。')
-      setBusy(false)
       return
     }
     const vbs: ViewBox[] = renderable.map((l) => l.vb)
@@ -397,81 +332,7 @@ export default function App() {
       setBusy(true)
       setError(null)
       try {
-        if (await detectOdb(dropped)) {
-          await handleOdb(dropped)
-          return
-        }
-
-        const entries = await gatherEntries(dropped.map((d) => d.file))
-        if (entries.length === 0) {
-          setError('未识别到 Gerber 文件，请检查扩展名或压缩包内容。')
-          setBusy(false)
-          return
-        }
-
-        const parsed: LayerItem[] = entries.map((e, idx) => ({
-          id: `${idx}-${e.name}`,
-          name: e.name,
-          meta: identifyLayer(e.name),
-        }))
-
-        // 仅对可渲染平面层解析 SVG；铜层额外解析图元用于网络高亮
-        const renderables = parsed.filter((p) => p.meta.renderable)
-        const isCopper = (k: string) =>
-          k === 'topCopper' || k === 'bottomCopper' || k === 'innerCopper'
-        await Promise.all(
-          renderables.map(async (p) => {
-            const entry = entries[parsed.indexOf(p)]
-            try {
-              const text = await entry.text()
-              const svg = await parseGerberToSvg(text)
-              const vb = getViewBox(svg)
-              const patch: Partial<LayerItem> = { svg, vb }
-              if (isCopper(p.meta.kind)) {
-                const parsedLayer = parseGerber(text)
-                patch.parsed = parsedLayer
-                patch.nets = computeNets(parsedLayer)
-              }
-              parsed[parsed.indexOf(p)] = { ...parsed[parsed.indexOf(p)], ...patch }
-            } catch (err) {
-              console.warn('图层解析失败:', p.name, err)
-            }
-          }),
-        )
-
-        const done = parsed
-          .filter((p) => p.meta.renderable && p.svg && p.vb)
-          .map((p) => ({ ...p }))
-
-        if (done.length === 0) {
-          setError('Gerber 解析未产生可渲染图层，请确认文件为 RS-274X 格式。')
-          setItems(parsed) // 仍展示其他文件（钻孔/板框）
-          setBusy(false)
-          return
-        }
-
-        const g: GlobalBox = computeGlobalBox(done.map((d) => d.vb!))
-        const asp = g.w / g.h || 1
-
-        const withTex = await Promise.all(
-          done.map(async (d) => {
-            const texture = await renderLayerTexture(d.svg!, d.vb!, g, asp, d.meta.color)
-            return { ...d, texture }
-          }),
-        )
-
-        // 释放旧纹理
-        for (const old of itemsRef.current) old.texture?.dispose()
-        for (const t of Object.values(netOverlays)) t.dispose()
-
-        const finalItems = [...withTex, ...parsed.filter((p) => !p.meta.renderable)]
-        gbRef.current = g
-        itemsRef.current = finalItems
-        setItems(finalItems)
-        setAspect(asp)
-        setSelectedNets(new Set())
-        setNetOverlays({})
-        setVisible(new Set(withTex.map((t) => t.id)))
+        await handleOdb(dropped)
       } catch (err) {
         console.error(err)
         setError('处理过程中发生错误：' + (err as Error).message)
@@ -479,7 +340,7 @@ export default function App() {
         setBusy(false)
       }
     },
-    [handleOdb, netOverlays],
+    [handleOdb],
   )
 
   const toggle = useCallback((id: string) => {
@@ -491,22 +352,20 @@ export default function App() {
     })
   }, [])
 
-  // 导出当前勾选（可见）的可渲染图层为矢量 PDF
+  // 导出当前勾选（可见）的可渲染图层为原生矢量 PDF
   const exportPdf = useCallback(
     (layout: PdfLayout) => {
       const renderable = itemsRef.current
-        .filter((i) => i.texture && visible.has(i.id))
+        .filter((i) => i.odb && i.texture && visible.has(i.id))
         .sort((a, b) => a.meta.order - b.meta.order)
       if (renderable.length === 0) return
       const g = gbRef.current
       if (!g) return
       const layers: PdfLayer[] = renderable.map((i) => ({
-        name: i.meta.name,
         color: i.meta.color,
-        svg: i.svg,
-        odb: i.odb,
+        odb: i.odb!,
       }))
-      exportLayersPdf(layers, { g, layout, title: 'PCB 图层' }).catch((e) => {
+      exportLayersPdf(layers, { g, layout }).catch((e) => {
         console.error('PDF 导出失败:', e)
         setError('PDF 导出失败：' + (e as Error).message)
       })
@@ -517,9 +376,7 @@ export default function App() {
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
   const hasRenderable = items.some((i) => i.texture)
 
-  // 选中网络变化时，为每个网络渲染一张专属颜色的高亮叠加纹理。
-  // 叠加纹理的 key 为 `${layerId}::${netKey}`，从而同一层可同时显示多个不同颜色的高亮。
-  // Gerber 走 gerber-to-svg 子集；ODB++ 走 renderOdbToTexture 子集。
+  // 选中网络变化时，为每个网络渲染一张专属颜色的高亮叠加纹理（renderOdbToTexture 子集）。
   useEffect(() => {
     let cancelled = false
     async function run() {
@@ -528,7 +385,7 @@ export default function App() {
       for (const key of selectedNets) {
         const color = netColors[key] ?? FALLBACK_NET_COLOR
         if (key.includes('::')) {
-          // 非显式（Gerber 合成）网络：单层单网
+          // 非显式（合成）网络：单层单网
           const sep = key.indexOf('::')
           const layerId = key.slice(0, sep)
           const netId = Number(key.slice(sep + 2))
@@ -562,16 +419,14 @@ export default function App() {
         const layer = itemsRef.current.find((i) => i.id === r.layerId)
         if (!layer?.vb) continue
         try {
-          let tex: import('three').Texture
-          if (layer.odb) {
-            tex = renderOdbToTexture(layer.odb, g, asp, r.color, new Set(r.net.primitiveIdxs))
-          } else if (layer.parsed) {
-            const subset = buildSubset(layer.parsed, r.net.primitiveIdxs)
-            const svg = await parseGerberToSvg(subset)
-            const svgVb = withViewBox(svg, layer.vb)
-            tex = await renderLayerTexture(svgVb, layer.vb, g, asp, r.color)
-          } else continue
-          out[r.oKey] = tex
+          if (!layer.odb) continue
+          out[r.oKey] = renderOdbToTexture(
+            layer.odb,
+            g,
+            asp,
+            r.color,
+            new Set(r.net.primitiveIdxs),
+          )
         } catch (e) {
           console.warn('网络高亮渲染失败:', layer.name, e)
         }
@@ -595,7 +450,7 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>PCB 爆炸图查看器</h1>
-        <span className="sub">Gerber Layer Exploder · 爆炸展开 / 平面展开</span>
+        <span className="sub">ODB++ Layer Exploder · 爆炸展开 / 平面展开</span>
       </header>
 
       <aside className="side">
@@ -655,7 +510,7 @@ export default function App() {
           />
         ) : (
           <div className="empty-hint">
-            拖入 Gerber 文件 / ODB++ 文件夹（或对应的 .zip）<br />
+            拖入 ODB++ 文件夹（或对应的 .zip）<br />
             即可将各层以爆炸图形式展开
           </div>
         )}

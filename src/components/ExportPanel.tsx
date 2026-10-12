@@ -28,7 +28,7 @@ export default function ExportPanel({ disabled, count, onExport }: Props) {
         导出 PDF{count > 0 ? `（${count} 层）` : ''}
       </button>
       <div className="meta">
-        仅导出当前勾选的图层为矢量 PDF（放大不失真），层名标注于页面左上角。
+        从 ODB++ 直接生成矢量 PDF（放大不失真），仅导出当前勾选的图层，白底。
       </div>
     </div>
   )

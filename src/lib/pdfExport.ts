@@ -1,237 +1,410 @@
-// PDF 导出（矢量版）：把各图层转成矢量 SVG，用 svg2pdf.js 写入 PDF（真矢量，放大不失真）。
-// 文字（层名，含中文）由浏览器 canvas 渲染为位图后嵌入——jsPDF 内置字体不含 CJK。
-// jsPDF / svg2pdf.js 均动态 import 懒加载，不增大主包。
-import type { jsPDF as JsPDF } from 'jspdf'
-import type { GlobalBox } from './gerber'
+// PDF 导出（原生矢量版）：直接从 ODB++ 解析出的图元生成原生 PDF，
+// 不经 SVG / svg2pdf / jsPDF 等中间层——图元以 PDF 路径运算符写入，
+// 铺铜内孔用 evenodd 填充（`f*`），焊盘用贝塞尔圆/椭圆，走线/圆弧用带宽度描边。
+// 内容流用 FlateDecode 压缩，纯矢量、放大不失真。
+//
+// 坐标系：板坐标（mm，y 轴向上）直接映射到 PDF 用户空间（pt，y 轴向上），
+// 与 3D 视图的顶视方向一致、不做镜像。PDF 页默认白底，仅绘制各层图元。
 import type { OdbLayer, OdbFeature, OdbSymbol } from './odb'
+import type { GlobalBox } from './geometry'
 
 export interface PdfLayer {
-  name: string
   color: string
-  /** Gerber 层的原始 gerber-to-svg 输出（含 viewBox / mask / use） */
-  svg?: string
-  /** ODB++ 层引用（features + symbols） */
-  odb?: OdbLayer
+  odb: OdbLayer
 }
 
 export type PdfLayout = 'grid' | 'perPage'
 
-const NS = 'http://www.w3.org/2000/svg'
-const XLINK = 'http://www.w3.org/1999/xlink'
+const KAPPA = 0.5522847498307936 // 贝塞尔圆近似常数 (4/3)(√2−1)
 
-// ---------- 几何辅助 ----------
-function circlePath(cx: number, cy: number, r: number): string {
-  return `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`
+// ---------- 数字格式化 ----------
+// 坐标最多 2 位小数（pt），去掉尾零；2 位小数 ≈ 0.0035mm 精度，远超 PCB 最小特征。
+function fmt(n: number): string {
+  if (!isFinite(n)) return '0'
+  const v = Math.round(n * 100) / 100
+  return String(v)
 }
 
-function polygonPath(pts: number[][]): string {
-  return pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ') + ' Z'
+/** hex 颜色 → [r,g,b] ∈ [0,1] */
+function hexToRgb01(hex: string): [number, number, number] {
+  let h = hex.replace('#', '')
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+  const n = parseInt(h, 16)
+  if (!isFinite(n)) return [0.6, 0.54, 0.16]
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
 }
 
-// ---------- ODB++ 图元 → SVG ----------
-function odbSymbolToSvg(sym: OdbSymbol): string {
+/** 字节序列（显式 ArrayBuffer 后端，满足 Blob/CompressionStream 的 BufferSource 类型） */
+type Bytes = Uint8Array<ArrayBuffer>
+
+const TE = new TextEncoder()
+const enc = (s: string): Bytes => TE.encode(s) as Bytes
+
+function concat(...arrs: Uint8Array[]): Bytes {
+  let len = 0
+  for (const a of arrs) len += a.length
+  const out = new Uint8Array(len)
+  let off = 0
+  for (const a of arrs) {
+    out.set(a, off)
+    off += a.length
+  }
+  return out
+}
+
+// ---------- 绘图上下文（板坐标 mm → PDF pt 的仿射变换 + 运算符缓冲） ----------
+class Gfx {
+  ops: string[]
+  // PDF_x = ax + x*s，PDF_y = ay + y*s
+  constructor(
+    private ax: number,
+    private ay: number,
+    private s: number,
+    ops?: string[],
+  ) {
+    this.ops = ops ?? []
+  }
+  /** 板坐标点 → "x y" */
+  P(x: number, y: number): string {
+    return `${fmt(this.ax + x * this.s)} ${fmt(this.ay + y * this.s)}`
+  }
+  /** 板坐标长度(mm) → pt 数值 */
+  W(mm: number): string {
+    return fmt(mm * this.s)
+  }
+}
+
+// ---------- 基础几何发射器 ----------
+/** 一段圆弧（局部坐标系：从角度 0 到 d，半径 r）对应的三次贝塞尔，追加 `c` 运算符。
+ *  当前点须已位于该段起点。 */
+function emitArcSeg(g: Gfx, cx: number, cy: number, r: number, a0: number, d: number) {
+  const alpha = (4 / 3) * Math.tan(d / 4)
+  const cd = Math.cos(d)
+  const sd = Math.sin(d)
+  const p1 = [r, r * alpha]
+  const p2 = [r * cd + r * alpha * sd, r * sd - r * alpha * cd]
+  const p3 = [r * cd, r * sd]
+  const c0 = Math.cos(a0)
+  const s0 = Math.sin(a0)
+  const R = (px: number, py: number): [number, number] => [
+    cx + px * c0 - py * s0,
+    cy + px * s0 + py * c0,
+  ]
+  const [x1, y1] = R(p1[0], p1[1])
+  const [x2, y2] = R(p2[0], p2[1])
+  const [x3, y3] = R(p3[0], p3[1])
+  g.ops.push(`${g.P(x1, y1)} ${g.P(x2, y2)} ${g.P(x3, y3)} c`)
+}
+
+/** 一段圆弧（从角度 a0 起扫过 sweep），追加若干 `c`。当前点须已位于弧起点。 */
+function emitArcSegs(g: Gfx, cx: number, cy: number, r: number, a0: number, sweep: number) {
+  const n = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2)))
+  const ds = sweep / n
+  for (let i = 0; i < n; i++) emitArcSeg(g, cx, cy, r, a0 + ds * i, ds)
+}
+
+/** 完整椭圆（四段贝塞尔），追加 `m` + 4×`c`，终点回到起点 */
+function emitEllipse(g: Gfx, cx: number, cy: number, rx: number, ry: number) {
+  const kx = rx * KAPPA
+  const ky = ry * KAPPA
+  g.ops.push(
+    `${g.P(cx + rx, cy)} m`,
+    `${g.P(cx + rx, cy + ky)} ${g.P(cx + kx, cy + ry)} ${g.P(cx, cy + ry)} c`,
+    `${g.P(cx - kx, cy + ry)} ${g.P(cx - rx, cy + ky)} ${g.P(cx - rx, cy)} c`,
+    `${g.P(cx - rx, cy - ky)} ${g.P(cx - kx, cy - ry)} ${g.P(cx, cy - ry)} c`,
+    `${g.P(cx + kx, cy - ry)} ${g.P(cx + rx, cy - ky)} ${g.P(cx + rx, cy)} c`,
+  )
+}
+
+/** 多边形（外轮廓或内孔），追加 `m` + `l`×n + `h` */
+function emitPolygon(g: Gfx, pts: number[][]) {
+  g.ops.push(`${g.P(pts[0][0], pts[0][1])} m`)
+  for (let k = 1; k < pts.length; k++) g.ops.push(`${g.P(pts[k][0], pts[k][1])} l`)
+  g.ops.push('h')
+}
+
+/** 圆角矩形（四角各一段 90° 圆弧贝塞尔），追加整条闭合路径 */
+function emitRoundedRect(g: Gfx, x0: number, y0: number, w: number, h: number, r: number) {
+  g.ops.push(`${g.P(x0 + r, y0)} m`, `${g.P(x0 + w - r, y0)} l`)
+  emitArcSegs(g, x0 + w - r, y0 + r, r, -Math.PI / 2, Math.PI / 2)
+  g.ops.push(`${g.P(x0 + w, y0 + h - r)} l`)
+  emitArcSegs(g, x0 + w - r, y0 + h - r, r, 0, Math.PI / 2)
+  g.ops.push(`${g.P(x0 + r, y0 + h)} l`)
+  emitArcSegs(g, x0 + r, y0 + h - r, r, Math.PI / 2, Math.PI / 2)
+  g.ops.push(`${g.P(x0, y0 + r)} l`)
+  emitArcSegs(g, x0 + r, y0 + r, r, Math.PI, Math.PI / 2)
+  g.ops.push('h')
+}
+
+/** 八角形（平顶/平底），追加闭合路径 + `f` */
+function emitOctagon(g: Gfx, cx: number, cy: number, w: number, h: number) {
+  const hw = w / 2
+  const hh = h / 2
+  const cw = hw * 0.7071
+  const ch = hh * 0.7071
+  emitPolygon(g, [
+    [cx - hw + cw, cy - hh],
+    [cx + hw - cw, cy - hh],
+    [cx + hw, cy - hh + ch],
+    [cx + hw, cy + hh - ch],
+    [cx + hw - cw, cy + hh],
+    [cx - hw + cw, cy + hh],
+    [cx - hw, cy + hh - ch],
+    [cx - hw, cy - hh + ch],
+  ])
+  g.ops.push('f')
+}
+
+/** 焊盘符号 → 填充路径 */
+function emitSymbol(g: Gfx, sym: OdbSymbol, x: number, y: number) {
   switch (sym.kind) {
     case 'round':
     case 'unknown': {
       const r = (sym.d ?? sym.w) / 2
-      return `<circle r="${r}"/>`
+      emitEllipse(g, x, y, r, r)
+      g.ops.push('f')
+      break
     }
     case 'square':
     case 'rect': {
       const w = sym.w
       const h = sym.h
       const r = Math.min(sym.r ?? 0, w / 2, h / 2)
-      const x0 = -w / 2
-      const y0 = -h / 2
-      if (r <= 0) return `<rect x="${x0}" y="${y0}" width="${w}" height="${h}"/>`
-      return `<path d="M ${x0 + r} ${y0} L ${x0 + w - r} ${y0} A ${r} ${r} 0 0 1 ${x0 + w} ${y0 + r} L ${x0 + w} ${y0 + h - r} A ${r} ${r} 0 0 1 ${x0 + w - r} ${y0 + h} L ${x0 + r} ${y0 + h} A ${r} ${r} 0 0 1 ${x0} ${y0 + h - r} L ${x0} ${y0 + r} A ${r} ${r} 0 0 1 ${x0 + r} ${y0} Z"/>`
+      const x0 = x - w / 2
+      const y0 = y - h / 2
+      if (r <= 0) {
+        g.ops.push(
+          `${g.P(x0, y0)} m`,
+          `${g.P(x0 + w, y0)} l`,
+          `${g.P(x0 + w, y0 + h)} l`,
+          `${g.P(x0, y0 + h)} l`,
+          'h',
+          'f',
+        )
+      } else {
+        emitRoundedRect(g, x0, y0, w, h, r)
+        g.ops.push('f')
+      }
+      break
     }
     case 'oval':
-      return `<ellipse rx="${sym.w / 2}" ry="${sym.h / 2}"/>`
-    case 'oct': {
-      const w = sym.w / 2
-      const h = sym.h / 2
-      const cw = w * 0.7071
-      const ch = h * 0.7071
-      return `<path d="${polygonPath([
-        [-w + cw, -h],
-        [w - cw, -h],
-        [w, -h + ch],
-        [w, h - ch],
-        [w - cw, h],
-        [-w + cw, h],
-        [-w, h - ch],
-        [-w, -h + ch],
-      ])}"/>`
-    }
+      emitEllipse(g, x, y, sym.w / 2, sym.h / 2)
+      g.ops.push('f')
+      break
+    case 'oct':
+      emitOctagon(g, x, y, sym.w, sym.h)
+      break
     case 'donut': {
       const outer = (sym.d ?? sym.w) / 2
       const inner = (sym.inner ?? outer * 0.5) / 2
-      return `<path fill-rule="evenodd" d="${circlePath(0, 0, outer)} ${circlePath(0, 0, inner)}"/>`
+      emitEllipse(g, x, y, outer, outer)
+      emitEllipse(g, x, y, inner, inner)
+      g.ops.push('f*')
+      break
     }
   }
-  return ''
 }
 
-function odbFeatureToSvg(f: OdbFeature, syms: Record<number, OdbSymbol>): string {
-  // 负极性（N）图元为“挖空”（反焊盘等）；当前样例均为正极性，N 暂跳过
-  if (f.polarity === 'N') return ''
-
+/** 单个图元 → 路径/描边运算符（负极性 N 图元为挖空，样例中不存在，暂跳过） */
+function emitFeature(g: Gfx, f: OdbFeature, syms: Record<number, OdbSymbol>) {
+  if (f.polarity === 'N') return
   if (f.kind === 'pad' && f.x != null && f.y != null) {
     const sym = syms[f.symbol]
-    if (!sym) return ''
-    return `<g transform="translate(${f.x} ${f.y})">${odbSymbolToSvg(sym)}</g>`
-  }
-  if (f.kind === 'line' && f.x1 != null) {
+    if (!sym) return
+    emitSymbol(g, sym, f.x, f.y)
+  } else if (f.kind === 'line' && f.x1 != null) {
     const sym = syms[f.symbol]
     const w = sym?.d ?? Math.min(sym?.w ?? 1, sym?.h ?? 1)
-    const cap = sym?.kind === 'round' || sym?.kind === 'oval' ? 'round' : 'butt'
-    return `<line x1="${f.x1}" y1="${f.y1}" x2="${f.x2}" y2="${f.y2}" stroke-width="${w}" stroke-linecap="${cap}"/>`
-  }
-  if (f.kind === 'arc' && f.x1 != null && f.cx != null) {
+    const cap = sym?.kind === 'round' || sym?.kind === 'oval' ? 1 : 0
+    g.ops.push(
+      `${g.W(w)} w`,
+      `${cap} J`,
+      `${g.P(f.x1, f.y1!)} m`,
+      `${g.P(f.x2!, f.y2!)} l`,
+      'S',
+    )
+  } else if (f.kind === 'arc' && f.x1 != null && f.cx != null) {
     const sym = syms[f.symbol]
     const w = sym?.d ?? Math.min(sym?.w ?? 1, sym?.h ?? 1)
     const r = Math.hypot(f.x1 - f.cx, f.y1! - f.cy!)
     if (r < 1e-6) {
-      return odbFeatureToSvg({ kind: 'pad', symbol: f.symbol, polarity: 'P', x: f.x1, y: f.y1 }, syms)
+      // 退化圆弧：按圆盘绘制
+      const rd = w / 2
+      emitEllipse(g, f.x1, f.y1!, rd, rd)
+      g.ops.push('f')
+    } else {
+      const a1 = Math.atan2(f.y1! - f.cy!, f.x1 - f.cx!)
+      const a2 = Math.atan2(f.y2! - f.cy!, f.x2! - f.cx!)
+      let da = a2 - a1
+      while (da > Math.PI) da -= 2 * Math.PI
+      while (da < -Math.PI) da += 2 * Math.PI
+      g.ops.push(`${g.P(f.x1, f.y1!)} m`)
+      emitArcSegs(g, f.cx, f.cy!, r, a1, da)
+      g.ops.push(`${g.W(w)} w`, '1 J', 'S')
     }
-    const a1 = Math.atan2(f.y1! - f.cy!, f.x1 - f.cx!)
-    const a2 = Math.atan2(f.y2! - f.cy!, f.x2! - f.cx!)
-    let da = a2 - a1
-    while (da > Math.PI) da -= 2 * Math.PI
-    while (da < -Math.PI) da += 2 * Math.PI
-    const steps = 32
-    const pts: number[][] = []
-    for (let s = 0; s <= steps; s++) {
-      const a = a1 + (da * s) / steps
-      pts.push([f.cx + Math.cos(a) * r, f.cy! + Math.sin(a) * r])
-    }
-    const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ')
-    return `<path d="${d}" fill="none" stroke-width="${w}" stroke-linecap="round"/>`
-  }
-  if (f.kind === 'surface' && f.poly && f.poly.length >= 3) {
-    let d = polygonPath(f.poly)
-    if (f.holes) for (const h of f.holes) if (h.length >= 3) d += ' ' + polygonPath(h)
-    return `<path fill-rule="evenodd" d="${d}"/>`
-  }
-  return ''
-}
-
-/** ODB++ 层 → 矢量 SVG 字符串（viewBox=全局板框，Y 翻转与渲染管线一致） */
-export function renderOdbToSvg(layer: OdbLayer, g: GlobalBox, color: string): string {
-  const parts: string[] = []
-  for (const f of layer.features) {
-    const s = odbFeatureToSvg(f, layer.symbols)
-    if (s) parts.push(s)
-  }
-  const H = 2 * g.minY + g.h
-  return `<svg xmlns="${NS}" xmlns:xlink="${XLINK}" viewBox="${g.minX} ${g.minY} ${g.w} ${g.h}">` +
-    `<g transform="translate(0 ${H}) scale(1 -1)" fill="${color}" stroke="${color}">${parts.join('')}</g></svg>`
-}
-
-// ---------- Gerber：把 gerber-to-svg 输出预处理为 svg2pdf 可用的纯矢量 ----------
-/**
- * 预处理 gerber-to-svg 输出：
- *  1) `<use>` 展开（gerber-to-svg 用 use 复用焊盘定义）；
- *  2) `<mask>`（负极性 clear 挖空）展平为 evenodd 内孔路径；
- *  3) viewBox 改为全局板框 g、Y 翻转 translate 同步；
- *  4) currentColor → 图层颜色。
- */
-function prepareGerberSvg(svgStr: string, color: string, g: GlobalBox): Element {
-  const doc = new DOMParser().parseFromString(svgStr, 'image/svg+xml')
-  const svg = doc.documentElement
-
-  // 1) use 展开
-  for (const use of [...svg.querySelectorAll('use')]) {
-    const href = use.getAttribute('href') || use.getAttributeNS(XLINK, 'href')
-    if (!href) continue
-    const ref = svg.querySelector(href)
-    if (!ref) continue
-    const x = parseFloat(use.getAttribute('x') || '0')
-    const y = parseFloat(use.getAttribute('y') || '0')
-    const gWrap = doc.createElementNS(NS, 'g')
-    gWrap.setAttribute('transform', `translate(${x} ${y})`)
-    gWrap.appendChild(ref.cloneNode(true))
-    use.replaceWith(gWrap)
-  }
-
-  // 2) mask 展平：挖空图形（mask 内非 #fff 的 shape）合并进引用元素，靠 evenodd 挖空
-  for (const mask of [...svg.querySelectorAll('mask')]) {
-    const id = mask.getAttribute('id')
-    const holes: Element[] = []
-    for (const el of mask.querySelectorAll('path,circle,rect,ellipse,polygon,polyline')) {
-      if (el.getAttribute('fill') === '#fff') continue
-      holes.push(el)
-    }
-    if (id) {
-      for (const user of [...svg.querySelectorAll(`[mask="url(#${id})"]`)]) {
-        user.removeAttribute('mask')
-        for (const h of holes) {
-          const c = h.cloneNode(true) as Element
-          c.removeAttribute('fill')
-          c.removeAttribute('stroke')
-          user.appendChild(c)
+  } else if (f.kind === 'surface' && f.poly && f.poly.length >= 3) {
+    emitPolygon(g, f.poly)
+    let hasHoles = false
+    if (f.holes) {
+      for (const h of f.holes) {
+        if (h.length >= 3) {
+          emitPolygon(g, h)
+          hasHoles = true
         }
       }
     }
-    mask.remove()
+    g.ops.push(hasHoles ? 'f*' : 'f')
+  }
+}
+
+/** 把一层的全部图元发射到指定 gfx（先设填充/描边颜色为图层色） */
+function emitLayer(g: Gfx, layer: OdbLayer, color: string) {
+  const [r, gg, b] = hexToRgb01(color)
+  g.ops.push(`${fmt(r)} ${fmt(gg)} ${fmt(b)} rg`, `${fmt(r)} ${fmt(gg)} ${fmt(b)} RG`)
+  for (const f of layer.features) emitFeature(g, f, layer.symbols)
+}
+
+// ---------- 布局 ----------
+interface Placed {
+  ox: number
+  oy: number
+  s: number
+}
+
+function perPagePlacements(layers: PdfLayer[], g: GlobalBox): { pw: number; ph: number; p: Placed } {
+  const long = 800
+  const margin = 20
+  const aspect = g.w / g.h || 1
+  const pw = aspect >= 1 ? long : Math.max(1, Math.round(long * aspect))
+  const ph = aspect >= 1 ? Math.max(1, Math.round(long / aspect)) : long
+  const s = Math.min((pw - 2 * margin) / g.w, (ph - 2 * margin) / g.h)
+  const ox = (pw - g.w * s) / 2
+  const oy = (ph - g.h * s) / 2
+  void layers
+  return { pw, ph, p: { ox, oy, s } }
+}
+
+// ---------- Flate 压缩 ----------
+async function deflate(data: Bytes): Promise<Bytes> {
+  const cs = new CompressionStream('deflate')
+  const writer = cs.writable.getWriter()
+  writer.write(data)
+  writer.close()
+  const reader = cs.readable.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const v = value as Uint8Array
+    chunks.push(v)
+    total += v.length
+  }
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const c of chunks) {
+    out.set(c, off)
+    off += c.length
+  }
+  return out
+}
+
+/** 组装原生 PDF（字节级：对象 + xref + trailer） */
+async function buildPdf(contents: Bytes[], mediaBoxes: [number, number][]): Promise<Bytes> {
+  const N = contents.length
+  const nObj = 2 + 2 * N
+  const compressed: Uint8Array[] = []
+  for (const c of contents) compressed.push(await deflate(c))
+
+  // 头部：%PDF-1.4 + 二进制标记注释（4 个高字节，便于阅读器识别二进制流）。
+  // 用显式字节数组构造，避免 TextEncoder 把高位字节按 UTF-8 二次编码。
+  const parts: Uint8Array[] = [new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a, 0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a])]
+  let len = parts[0].length
+  const offsets: number[] = new Array(nObj + 1).fill(0)
+  const add = (b: Uint8Array) => {
+    parts.push(b)
+    len += b.length
+  }
+  const body = (num: number, b: Uint8Array) => {
+    offsets[num] = len
+    add(enc(`${num} 0 obj\n`))
+    add(b)
+    add(enc('\nendobj\n'))
   }
 
-  // 3) viewBox → 全局板框 g
-  svg.setAttribute('viewBox', `${g.minX} ${g.minY} ${g.w} ${g.h}`)
+  body(1, enc('<< /Type /Catalog /Pages 2 0 R >>'))
+  const kids = Array.from({ length: N }, (_, i) => `${3 + i} 0 R`).join(' ')
+  body(2, enc(`<< /Type /Pages /Kids [${kids}] /Count ${N} >>`))
+  for (let i = 0; i < N; i++) {
+    const pageNum = 3 + i
+    const contNum = 3 + N + i
+    body(
+      pageNum,
+      enc(
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${fmt(mediaBoxes[i][0])} ${fmt(mediaBoxes[i][1])}] /Resources << >> /Contents ${contNum} 0 R >>`,
+      ),
+    )
+    const stream = compressed[i]
+    body(contNum, concat(enc(`<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`), stream, enc('\nendstream')))
+  }
 
-  // 4) Y 翻转 translate 同步（translate(0, H) scale(1,-1) 的 H 改为 2*g.minY+g.h）
-  const H = 2 * g.minY + g.h
-  for (const el of [...svg.querySelectorAll('g')]) {
-    const t = el.getAttribute('transform') || ''
-    if (/scale\(1[ ,]-1\)/.test(t)) {
-      el.setAttribute('transform', t.replace(/translate\([^)]*\)/, `translate(0 ${H})`))
+  const xrefOffset = len
+  let xref = `xref\n0 ${nObj + 1}\n0000000000 65535 f \n`
+  for (let num = 1; num <= nObj; num++) xref += String(offsets[num]).padStart(10, '0') + ' 00000 n \n'
+  add(enc(xref))
+  add(enc(`trailer\n<< /Size ${nObj + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`))
+  return concat(...parts)
+}
+
+/** 由 ODB++ 图层 + 全局板框生成原生矢量 PDF 字节 */
+export async function buildPdfFromLayers(
+  layers: PdfLayer[],
+  g: GlobalBox,
+  layout: PdfLayout,
+): Promise<Bytes> {
+  const contents: Bytes[] = []
+  const mediaBoxes: [number, number][] = []
+
+  if (layout === 'perPage') {
+    const { pw, ph, p } = perPagePlacements(layers, g)
+    for (const layer of layers) {
+      const gfx = new Gfx(p.ox - g.minX * p.s, p.oy - g.minY * p.s, p.s)
+      emitLayer(gfx, layer.odb, layer.color)
+      contents.push(enc(gfx.ops.join('\n')))
+      mediaBoxes.push([pw, ph])
     }
+  } else {
+    // grid：A4 横向单页，各层按网格排布
+    const n = layers.length
+    const cols = Math.ceil(Math.sqrt(n))
+    const rows = Math.ceil(n / cols)
+    const pw = 841.89
+    const ph = 595.28
+    const margin = 20
+    const gap = 10
+    const aw = pw - 2 * margin
+    const ah = ph - 2 * margin
+    const cellW = (aw - (cols - 1) * gap) / cols
+    const cellH = (ah - (rows - 1) * gap) / rows
+    const s = Math.min(cellW / g.w, cellH / g.h)
+    const imgW = g.w * s
+    const imgH = g.h * s
+    const ops: string[] = []
+    for (let i = 0; i < n; i++) {
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      const cellTopY = ph - margin - row * (cellH + gap)
+      const imgY = cellTopY - cellH / 2 - imgH / 2
+      const imgX = margin + col * (cellW + gap) + (cellW - imgW) / 2
+      const gfx = new Gfx(imgX - g.minX * s, imgY - g.minY * s, s, ops)
+      emitLayer(gfx, layers[i].odb, layers[i].color)
+    }
+    contents.push(enc(ops.join('\n')))
+    mediaBoxes.push([pw, ph])
   }
 
-  // 5) currentColor → 颜色
-  for (const el of [...svg.querySelectorAll('*')]) {
-    if (el.getAttribute('fill') === 'currentColor') el.setAttribute('fill', color)
-    if (el.getAttribute('stroke') === 'currentColor') el.setAttribute('stroke', color)
-  }
-  svg.setAttribute('color', color)
-
-  return svg
+  return buildPdf(contents, mediaBoxes)
 }
-
-/** 统一：把某个导出图层转成 svg2pdf 可消费的 SVG 根元素 */
-function layerToSvgElement(layer: PdfLayer, g: GlobalBox): Element {
-  if (layer.odb) {
-    const str = renderOdbToSvg(layer.odb, g, layer.color)
-    return new DOMParser().parseFromString(str, 'image/svg+xml').documentElement
-  }
-  if (layer.svg) return prepareGerberSvg(layer.svg, layer.color, g)
-  throw new Error('图层缺少可导出的矢量数据')
-}
-
-// ---------- 文字（中文安全，canvas 位图） ----------
-function renderTextDataUrl(text: string, px: number, color: string): { url: string; w: number; h: number } {
-  const font = `${px}px Georgia, "Microsoft YaHei", "SimSun", sans-serif`
-  const measure = document.createElement('canvas').getContext('2d')!
-  measure.font = font
-  const tw = Math.ceil(measure.measureText(text).width)
-  const pad = px * 0.4
-  const w = tw + pad * 2
-  const h = px * 1.35
-  const scale = 3 // 超采样保证清晰
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.ceil(w * scale)
-  canvas.height = Math.ceil(h * scale)
-  const ctx = canvas.getContext('2d')!
-  ctx.scale(scale, scale)
-  ctx.font = font
-  ctx.fillStyle = color
-  ctx.textBaseline = 'alphabetic'
-  ctx.fillText(text, pad, px * 0.95)
-  return { url: canvas.toDataURL('image/png'), w, h }
-}
-
-const px2mm = (px: number) => (px / 96) * 25.4
 
 function stamp(): string {
   const d = new Date()
@@ -239,85 +412,20 @@ function stamp(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
-/** 导出图层为矢量 PDF 并触发下载 */
+/** 导出图层为原生矢量 PDF 并触发下载 */
 export async function exportLayersPdf(
   layers: PdfLayer[],
-  opts: { g: GlobalBox; layout: PdfLayout; title: string },
+  opts: { g: GlobalBox; layout: PdfLayout },
 ): Promise<void> {
   if (layers.length === 0) return
-  const { g } = opts
-  const aspect = g.w / g.h || 1
-
-  const { jsPDF } = await import('jspdf')
-  const { svg2pdf } = await import('svg2pdf.js')
-
-  const labelColor = '#1f3a5f'
-
-  let doc: JsPDF
-
-  if (opts.layout === 'perPage') {
-    const longMm = 240
-    const marginMm = 10
-    const imgWmm = aspect >= 1 ? longMm : longMm * aspect
-    const imgHmm = aspect >= 1 ? longMm / aspect : longMm
-    const topMm = 28 // 标题文字(20,20)下方留白
-    const pw = imgWmm + marginMm * 2
-    const ph = topMm + imgHmm + marginMm
-    const orientation = pw >= ph ? 'landscape' : 'portrait'
-    doc = new jsPDF({ orientation, unit: 'mm', format: [pw, ph], compress: true })
-
-    for (let i = 0; i < layers.length; i++) {
-      if (i > 0) doc.addPage([pw, ph], orientation)
-      const layer = layers[i]
-      const svgEl = layerToSvgElement(layer, g)
-      await svg2pdf(svgEl, doc, {
-        x: (pw - imgWmm) / 2,
-        y: topMm,
-        width: imgWmm,
-        height: imgHmm,
-      })
-      // 层名文字：左上角 (20,20)
-      const t = renderTextDataUrl(layer.name, 15, labelColor)
-      doc.addImage(t.url, 'PNG', 20, 20, px2mm(t.w), px2mm(t.h))
-    }
-  } else {
-    // grid：A4 横向单页，各层矢量网格排布 + 层名标签
-    const pw = 297
-    const ph = 210
-    doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true })
-
-    const margin = 10
-    const titleH = 28
-    const gap = 3
-    const labelH = 5
-    const n = layers.length
-    const cols = Math.ceil(Math.sqrt(n))
-    const rows = Math.ceil(n / cols)
-    const aw = pw - margin * 2
-    const ah = ph - margin - titleH
-    const imgW = Math.min((aw - (cols - 1) * gap) / cols, ((ah - rows * labelH - (rows - 1) * gap) / rows) * aspect)
-    const imgH = imgW / aspect
-    const gridW = cols * imgW + (cols - 1) * gap
-    const gridH = rows * (imgH + labelH) + (rows - 1) * gap
-    const x0 = (pw - gridW) / 2
-    const y0 = titleH + (ah - gridH) / 2
-
-    // 标题
-    const t = renderTextDataUrl(opts.title, 15, labelColor)
-    doc.addImage(t.url, 'PNG', 20, 20, px2mm(t.w), px2mm(t.h))
-
-    for (let i = 0; i < n; i++) {
-      const col = i % cols
-      const row = Math.floor(i / cols)
-      const x = x0 + col * (imgW + gap)
-      const y = y0 + row * (imgH + labelH + gap)
-      const svgEl = layerToSvgElement(layers[i], g)
-      await svg2pdf(svgEl, doc, { x, y, width: imgW, height: imgH })
-      const lbl = renderTextDataUrl(layers[i].name, 9, labelColor)
-      doc.addImage(lbl.url, 'PNG', x + imgW / 2 - px2mm(lbl.w) / 2, y + imgH + 0.5, px2mm(lbl.w), px2mm(lbl.h))
-    }
-  }
-
-  const name = opts.title.replace(/\s+/g, '-') || 'pcb-layers'
-  doc.save(`${name}-${stamp()}.pdf`)
+  const pdf = await buildPdfFromLayers(layers, opts.g, opts.layout)
+  const blob = new Blob([pdf], { type: 'application/pdf' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `pcb-layers-${stamp()}.pdf`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

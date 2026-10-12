@@ -63,13 +63,13 @@ export default function DropZone({ onFiles, busy }: Props) {
       onDragLeave={() => setOver(false)}
       onDrop={handleDrop}
     >
-      <strong>{busy ? '正在解析图层…' : '拖入 Gerber / ODB++ 文件 / 文件夹 / .zip'}</strong>
-      <small>支持 GTL·GBL·G1..·GM1·DRL 等 Gerber 扩展名，以及 ODB++ 目录树或 .zip</small>
+      <strong>{busy ? '正在解析图层…' : '拖入 ODB++ 文件夹 / .zip'}</strong>
+      <small>支持 ODB++ 目录树（steps/&lt;step&gt;/layers/...）或对应 .zip 压缩包</small>
       <input
         ref={inputRef}
         type="file"
         multiple
-        accept=".gbr,.gtl,.gbl,.gts,.gbs,.gto,.gbo,.gtp,.gbp,.gko,.gm1,.gm2,.gm3,.gml,.g1,.g2,.g3,.g4,.gp1,.in1,.drl,.txt,.zip"
+        accept=".zip"
         style={{ display: 'none' }}
         onChange={(e) => {
           const files = Array.from(e.target.files || [])

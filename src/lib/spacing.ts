@@ -1,6 +1,6 @@
 // 双网络最小间距计算。
 //
-// 将 Gerber 图元 / ODB++ 图元统一分解为三种“填充形状”：
+// 将 ODB++ 图元统一分解为三种“填充形状”：
 //   circle   —— 圆盘（焊盘/过孔）
 //   capsule  —— 线段 + 半宽的胶囊（走线/圆弧近似）
 //   poly     —— 填充多边形（矩形/八角焊盘、铜箔铺铜，可含内孔）
@@ -10,7 +10,6 @@
 
 import type { Net } from './nets'
 import type { OdbLayer, OdbFeature, OdbSymbol } from './odb'
-import type { ParsedLayer } from './gerberParse'
 
 export interface SpacingResult {
   layerId: string
@@ -47,21 +46,6 @@ export function odbNetShapes(layer: OdbLayer, net: Net): SpShape[] {
   for (const i of net.primitiveIdxs) {
     const f = feats[i]
     if (f) pushOdbFeature(out, f, syms)
-  }
-  return out
-}
-
-/** 将 Gerber 图元（按 net.primitiveIdxs 索引 parsed.primitives）分解为形状 */
-export function gerberNetShapes(parsed: ParsedLayer, net: Net): SpShape[] {
-  const out: SpShape[] = []
-  const prims = parsed.primitives
-  for (const i of net.primitiveIdxs) {
-    const pr = prims[i]
-    if (!pr) continue
-    for (const o of pr.obs) {
-      if (o.type === 'c') out.push({ t: 'c', x: o.x, y: o.y, r: o.r })
-      else out.push({ t: 's', x0: o.x0, y0: o.y0, x1: o.x1, y1: o.y1, r: o.w })
-    }
   }
   return out
 }

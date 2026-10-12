@@ -8,7 +8,7 @@
 import * as THREE from 'three'
 import { layerColor, type LayerKind, type LayerMeta } from './layers'
 import type { Net } from './nets'
-import type { GlobalBox, ViewBox } from './gerber'
+import type { GlobalBox, ViewBox } from './geometry'
 
 const INCH_TO_MM = 25.4
 const MIL_TO_MM = 0.0254
