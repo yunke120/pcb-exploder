@@ -240,6 +240,8 @@ export default function App() {
   const [aspect, setAspect] = useState(1)
   const [explosion, setExplosion] = useState(1.4)
   const [showLabels, setShowLabels] = useState(true)
+  /** 视图模式：exploded=沿 Z 轴层叠展开；flat=各层在 XY 平面内网格铺开 */
+  const [viewMode, setViewMode] = useState<'exploded' | 'flat'>('exploded')
   const [visible, setVisible] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -568,7 +570,7 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>PCB 爆炸图查看器</h1>
-        <span className="sub">Gerber Layer Exploder · 仅层展开</span>
+        <span className="sub">Gerber Layer Exploder · 爆炸展开 / 平面展开</span>
       </header>
 
       <aside className="side">
@@ -586,6 +588,8 @@ export default function App() {
           setExplosion={setExplosion}
           showLabels={showLabels}
           setShowLabels={setShowLabels}
+          viewMode={viewMode}
+          setViewMode={setViewMode}
         />
         <NetPanel
           items={items}
@@ -617,6 +621,7 @@ export default function App() {
             overlays={netOverlays}
             g={gbRef.current ?? undefined}
             marks={spacingMarks}
+            viewMode={viewMode}
           />
         ) : (
           <div className="empty-hint">

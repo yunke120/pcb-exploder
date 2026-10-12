@@ -13,20 +13,73 @@ interface Props {
   overlays: Record<string, import('three').Texture>
   g?: GlobalBox
   marks: SpacingMark[]
+  viewMode: 'exploded' | 'flat'
 }
 
 const BASE_SPACING = 0.07
 
+/** 平面展开网格参数 */
+const FLAT_GAP = 0.22
+const FLAT_TARGET = 2.4
+
+/** 每个可见图层在 3D 世界中的位置与缩放 */
+interface Placement {
+  x: number
+  y: number
+  z: number
+  scale: number
+}
+
+/** 爆炸展开：各层沿 Z 轴等距展开 */
+function explodedPlacements(n: number, spacing: number): Placement[] {
+  return Array.from({ length: n }, (_, i) => ({
+    x: 0,
+    y: 0,
+    z: (i - (n - 1) / 2) * spacing,
+    scale: 1,
+  }))
+}
+
+/** 平面展开：各层在 XY 平面内按网格铺开，单层保持原有宽高比 */
+function flatPlacements(n: number, planeW: number, planeH: number): Placement[] {
+  const cols = Math.ceil(Math.sqrt(n))
+  const rows = Math.ceil(n / cols)
+  const scale = Math.max(
+    0.05,
+    Math.min(
+      (FLAT_TARGET - (cols - 1) * FLAT_GAP) / (cols * planeW),
+      (FLAT_TARGET - (rows - 1) * FLAT_GAP) / (rows * planeH),
+      1,
+    ),
+  )
+  const cw = planeW * scale
+  const ch = planeH * scale
+  const gw = cols * cw + (cols - 1) * FLAT_GAP
+  const gh = rows * ch + (rows - 1) * FLAT_GAP
+  const out: Placement[] = []
+  for (let i = 0; i < n; i++) {
+    const col = i % cols
+    const row = Math.floor(i / cols)
+    out.push({
+      x: -gw / 2 + col * (cw + FLAT_GAP) + cw / 2,
+      y: gh / 2 - row * (ch + FLAT_GAP) - ch / 2,
+      z: 0,
+      scale,
+    })
+  }
+  return out
+}
+
 function LayerMesh({
   item,
-  z,
+  placement,
   planeW,
   planeH,
   showLabel,
   overlayTextures,
 }: {
   item: LayerItem
-  z: number
+  placement: Placement
   planeW: number
   planeH: number
   showLabel: boolean
@@ -34,7 +87,10 @@ function LayerMesh({
 }) {
   const tex = item.texture!
   return (
-    <group position={[0, 0, z]}>
+    <group
+      position={[placement.x, placement.y, placement.z]}
+      scale={[placement.scale, placement.scale, 1]}
+    >
       {/* 半透明底板，体现该层的“薄片”范围 */}
       <mesh>
         <planeGeometry args={[planeW, planeH]} />
@@ -108,24 +164,26 @@ function boardToPlane(
 
 function SpacingMarker({
   mark,
-  z,
+  placement,
   planeW,
   planeH,
   g,
 }: {
   mark: SpacingMark
-  z: number
+  placement: Placement
   planeW: number
   planeH: number
   g: GlobalBox
 }) {
-  const a = boardToPlane(mark.pA[0], mark.pA[1], g, planeW, planeH)
-  const b = boardToPlane(mark.pB[0], mark.pB[1], g, planeW, planeH)
+  const la = boardToPlane(mark.pA[0], mark.pA[1], g, planeW, planeH)
+  const lb = boardToPlane(mark.pB[0], mark.pB[1], g, planeW, planeH)
+  const a = { x: placement.x + la.x * placement.scale, y: placement.y + la.y * placement.scale }
+  const b = { x: placement.x + lb.x * placement.scale, y: placement.y + lb.y * placement.scale }
   const mx = (a.x + b.x) / 2
   const my = (a.y + b.y) / 2
   const len = Math.hypot(b.x - a.x, b.y - a.y)
   const ang = Math.atan2(b.y - a.y, b.x - a.x)
-  const zz = z + 0.003
+  const zz = placement.z + 0.003
   return (
     <group>
       {/* 最近点连线（亮红色细线，贴合所在层） */}
@@ -172,6 +230,7 @@ export default function ExplosionView({
   overlays,
   g,
   marks,
+  viewMode,
 }: Props) {
   const planeW = aspect >= 1 ? 1 : aspect
   const planeH = aspect >= 1 ? 1 / aspect : 1
@@ -183,6 +242,14 @@ export default function ExplosionView({
   const n = ordered.length
   const spacing = BASE_SPACING * explosion
 
+  const placements = useMemo<Placement[]>(
+    () =>
+      viewMode === 'flat'
+        ? flatPlacements(n, planeW, planeH)
+        : explodedPlacements(n, spacing),
+    [viewMode, n, planeW, planeH, spacing],
+  )
+
   return (
     <Canvas
       camera={{ position: [1.4, 1.4, 1.2], fov: 42, up: [0, 0, 1] }}
@@ -192,7 +259,6 @@ export default function ExplosionView({
       <ambientLight intensity={0.8} />
       <directionalLight position={[2, 2, 3]} intensity={0.6} />
       {ordered.map((item, i) => {
-        const z = (i - (n - 1) / 2) * spacing
         const overlayTextures = Object.entries(overlays)
           .filter(([k]) => k.startsWith(item.id + '::'))
           .map(([, t]) => t)
@@ -200,7 +266,7 @@ export default function ExplosionView({
           <LayerMesh
             key={item.id}
             item={item}
-            z={z}
+            placement={placements[i]}
             planeW={planeW}
             planeH={planeH}
             showLabel={showLabels}
@@ -212,12 +278,11 @@ export default function ExplosionView({
         marks.map((mark) => {
           const idx = ordered.findIndex((i) => i.id === mark.layerId)
           if (idx < 0) return null
-          const z = (idx - (n - 1) / 2) * spacing
           return (
             <SpacingMarker
               key={mark.layerId}
               mark={mark}
-              z={z}
+              placement={placements[idx]}
               planeW={planeW}
               planeH={planeH}
               g={g}

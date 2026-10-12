@@ -115,7 +115,29 @@ body {
 .layer-row .meta { font-size: 11px; color: var(--ink-soft); opacity: 0.85; }
 
 input[type="range"] { width: 100%; accent-color: var(--accent); }
+input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
 .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; }
+
+/* 视图模式切换 */
+.seg {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg-btn {
+  flex: 1;
+  border: none;
+  background: var(--paper-2);
+  color: var(--ink-soft);
+  padding: 7px 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--line); }
+.seg-btn:hover:not(.active) { background: #fff; }
+.seg-btn.active { background: var(--accent); color: #fff; }
 .btn {
   border: 1px solid var(--line);
   background: var(--paper-2);

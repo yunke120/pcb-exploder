@@ -10,6 +10,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 *.log
+scripts/.shots/
 
 # ---------- 桌面打包产物（Win7 离线版） ----------
 release/

@@ -8,6 +8,8 @@ interface Props {
   setExplosion: (v: number) => void
   showLabels: boolean
   setShowLabels: (v: boolean) => void
+  viewMode: 'exploded' | 'flat'
+  setViewMode: (v: 'exploded' | 'flat') => void
 }
 
 export default function LayerPanel({
@@ -18,12 +20,34 @@ export default function LayerPanel({
   setExplosion,
   showLabels,
   setShowLabels,
+  viewMode,
+  setViewMode,
 }: Props) {
   const renderable = items.filter((i) => i.texture)
   const others = items.filter((i) => !i.texture)
 
   return (
     <div>
+      <div className="section">
+        <h2>视图模式</h2>
+        <div className="seg">
+          <button
+            className={`seg-btn ${viewMode === 'exploded' ? 'active' : ''}`}
+            onClick={() => setViewMode('exploded')}
+            title="各层沿 Z 轴等距层叠展开"
+          >
+            爆炸展开
+          </button>
+          <button
+            className={`seg-btn ${viewMode === 'flat' ? 'active' : ''}`}
+            onClick={() => setViewMode('flat')}
+            title="各层在同一平面内按网格铺开"
+          >
+            平面展开
+          </button>
+        </div>
+      </div>
+
       <div className="section">
         <h2>爆炸间距</h2>
         <div className="row">
@@ -33,10 +57,16 @@ export default function LayerPanel({
             max={4}
             step={0.05}
             value={explosion}
+            disabled={viewMode === 'flat'}
             onChange={(e) => setExplosion(parseFloat(e.target.value))}
           />
           <span style={{ width: 38, textAlign: 'right' }}>{explosion.toFixed(2)}×</span>
         </div>
+        {viewMode === 'flat' && (
+          <div className="meta" style={{ fontSize: 11, color: 'var(--ink-soft)' }}>
+            平面展开模式下各层并排铺开，无需调整爆炸间距。
+          </div>
+        )}
         <label className="row" style={{ cursor: 'pointer' }}>
           <input
             type="checkbox"
