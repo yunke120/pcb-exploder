@@ -4,6 +4,8 @@ import DropZone, { type DroppedItem } from './components/DropZone'
 import LayerPanel from './components/LayerPanel'
 import NetPanel from './components/NetPanel'
 import ExplosionView from './components/ExplosionView'
+import ExportPanel from './components/ExportPanel'
+import { exportLayersPdf, type PdfLayout, type PdfLayer } from './lib/pdfExport'
 import { identifyLayer, type LayerMeta } from './lib/layers'
 import {
   parseGerberToSvg,
@@ -489,6 +491,25 @@ export default function App() {
     })
   }, [])
 
+  // 导出当前所有可渲染图层为 PDF
+  const exportPdf = useCallback(
+    (layout: PdfLayout) => {
+      const renderable = itemsRef.current
+        .filter((i) => i.texture)
+        .sort((a, b) => a.meta.order - b.meta.order)
+      if (renderable.length === 0) return
+      const layers: PdfLayer[] = renderable.map((i) => ({
+        name: i.meta.name,
+        canvas: i.texture!.image as HTMLCanvasElement,
+      }))
+      exportLayersPdf(layers, { aspect: aspect || 1, layout, title: 'PCB 图层' }).catch((e) => {
+        console.error('PDF 导出失败:', e)
+        setError('PDF 导出失败：' + (e as Error).message)
+      })
+    },
+    [aspect],
+  )
+
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
   const hasRenderable = items.some((i) => i.texture)
 
@@ -580,6 +601,7 @@ export default function App() {
             {error}
           </div>
         )}
+        <ExportPanel disabled={!hasRenderable} onExport={exportPdf} />
         <LayerPanel
           items={items}
           visible={visible}

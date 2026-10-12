@@ -150,6 +150,21 @@ input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .btn:hover { background: #fff; border-color: var(--accent); }
 .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* 导出 PDF */
+.export-select {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  background: #fff;
+  color: var(--ink);
+}
+.export-btn { width: 100%; }
+.meta { font-size: 11px; color: var(--ink-soft); opacity: 0.85; line-height: 1.5; margin-top: 6px; }
 
 .empty-hint {
   position: absolute;
