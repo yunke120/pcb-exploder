@@ -888,7 +888,10 @@ export function renderOdbToTexture(
   color: string,
   indices?: Set<number>,
 ): THREE.Texture {
-  const maxTex = 1024
+  // 纹理分辨率按板框长边自适应：保证每毫米足够像素密度，放大后细节依然清晰。
+  // 上限 4096 兼顾显存占用与老 GPU（Win7 常见集成显卡）的 MAX_TEXTURE_SIZE 兼容性。
+  const PX_PER_MM = 40
+  const maxTex = Math.min(4096, Math.max(1024, Math.round(Math.max(g.w, g.h) * PX_PER_MM)))
   const cw = aspect >= 1 ? maxTex : Math.round(maxTex * aspect)
   const ch = aspect >= 1 ? Math.round(maxTex / aspect) : maxTex
   const canvas = document.createElement('canvas')

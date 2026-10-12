@@ -97,28 +97,36 @@ export function renderLayerTexture(
   color: string,
 ): Promise<THREE.Texture> {
   return new Promise((resolve, reject) => {
-    // 设置 px 尺寸（供 canvas 拉伸），并按图层颜色着色 currentColor
-    let s = svg.replace(/\swidth="[^"]*"/, ` width="${Math.round(vb.w)}"`)
-    s = s.replace(/\sheight="[^"]*"/, ` height="${Math.round(vb.h)}"`)
+    // 目标纹理尺寸与缩放（与 ODB++ 渲染一致）。
+    // Gerber 的 vb/g 为 1000×Gerber 单位，这里只关心“长边像素数”，
+    // 数值通常远大于阈值，实际收敛到 4096 上限。
+    const maxTex = Math.min(4096, Math.max(1024, Math.round(Math.max(g.w, g.h) * 40)))
+    const cw = aspect >= 1 ? maxTex : Math.round(maxTex * aspect)
+    const ch = aspect >= 1 ? Math.round(maxTex / aspect) : maxTex
+    const scale = cw / g.w
+    const dw = vb.w * scale
+    const dh = vb.h * scale
+
+    // 关键：把 SVG 固有 px 尺寸设为最终绘制尺寸（而非 vb 的小数值），
+    // 让浏览器以高分辨率栅格化矢量内容，drawImage 时 1:1 绘制，
+    // 避免“小位图被放大”导致的模糊。并按图层颜色着色 currentColor。
+    const svgW = Math.max(1, Math.round(dw))
+    const svgH = Math.max(1, Math.round(dh))
+    let s = svg.replace(/\swidth="[^"]*"/, ` width="${svgW}"`)
+    s = s.replace(/\sheight="[^"]*"/, ` height="${svgH}"`)
     s = s.replace(/(<svg[^>]*)/, `$1 color="${color}" style="color:${color}"`)
 
     const blob = new Blob([s], { type: 'image/svg+xml;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const img = new Image()
     img.onload = () => {
-      const maxTex = 1024
-      const cw = aspect >= 1 ? maxTex : Math.round(maxTex * aspect)
-      const ch = aspect >= 1 ? Math.round(maxTex / aspect) : maxTex
       const canvas = document.createElement('canvas')
       canvas.width = cw
       canvas.height = ch
       const ctx = canvas.getContext('2d')!
       ctx.clearRect(0, 0, cw, ch)
-      const scale = cw / g.w
       const dx = (vb.minX - g.minX) * scale
       const dy = (vb.minY - g.minY) * scale
-      const dw = vb.w * scale
-      const dh = vb.h * scale
       ctx.drawImage(img, dx, dy, dw, dh)
       const tex = new THREE.CanvasTexture(canvas)
       tex.colorSpace = THREE.SRGBColorSpace
