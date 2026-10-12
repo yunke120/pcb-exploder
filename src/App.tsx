@@ -491,11 +491,11 @@ export default function App() {
     })
   }, [])
 
-  // 导出当前所有可渲染图层为 PDF
+  // 导出当前勾选（可见）的可渲染图层为 PDF
   const exportPdf = useCallback(
     (layout: PdfLayout) => {
       const renderable = itemsRef.current
-        .filter((i) => i.texture)
+        .filter((i) => i.texture && visible.has(i.id))
         .sort((a, b) => a.meta.order - b.meta.order)
       if (renderable.length === 0) return
       const layers: PdfLayer[] = renderable.map((i) => ({
@@ -507,7 +507,7 @@ export default function App() {
         setError('PDF 导出失败：' + (e as Error).message)
       })
     },
-    [aspect],
+    [aspect, visible],
   )
 
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
@@ -601,7 +601,11 @@ export default function App() {
             {error}
           </div>
         )}
-        <ExportPanel disabled={!hasRenderable} onExport={exportPdf} />
+        <ExportPanel
+          disabled={visibleItems.length === 0}
+          count={visibleItems.length}
+          onExport={exportPdf}
+        />
         <LayerPanel
           items={items}
           visible={visible}

@@ -1,11 +1,12 @@
-// 验证 PDF 导出：注入 odb.zip → 等待渲染 → 点击导出（grid / perPage）
-// → 通过 hook URL.createObjectURL 捕获 application/pdf blob，校验文件头/大小，检查 console 错误。
+// 验证 PDF 导出：仅导出勾选图层 + 白底。
+// 1) 取消勾选一个图层后，按钮层数从 11 → 10；2) 导出 grid PDF blob 生成；
+// 3) 探针记录 canvas fillStyle，确认出现白底 #ffffff 且无深色底 #16283a。
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
-const PORT = 9335
+const PORT = 9336
 const URL = 'http://127.0.0.1:4199/'
 const ZIP = 'C:/Users/yk/WorkBuddy/Claw/pcb-exploder/odb.zip'
 const OUT = 'C:/Users/yk/WorkBuddy/Claw/pcb-exploder/scripts/.shots'
@@ -17,7 +18,7 @@ const chrome = spawn(CHROME, [
   '--no-first-run',
   '--disable-gpu',
   '--no-proxy-server',
-  '--user-data-dir=' + OUT + '/profile-pdf2',
+  '--user-data-dir=' + OUT + '/profile-pdf3',
   '--window-size=1400,900',
   'about:blank',
 ], { stdio: 'ignore' })
@@ -35,25 +36,24 @@ function send(method, params = {}) {
   })
 }
 
-async function readBlob(index) {
-  const r = await send('Runtime.evaluate', {
-    expression: `new Promise(res => {
-      const b = window.__pdfBlobs && window.__pdfBlobs[${index}];
-      if (!b) return res(null);
-      const fr = new FileReader();
-      fr.onload = () => res(fr.result);
-      fr.readAsDataURL(b);
-    })`,
-    awaitPromise: true,
-    returnByValue: true,
-  })
+async function evalJs(expression, awaitPromise = false) {
+  const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise })
   return r.result.value
+}
+
+async function readBlob(index) {
+  return evalJs(`new Promise(res => {
+    const b = window.__pdfBlobs && window.__pdfBlobs[${index}];
+    if (!b) return res(null);
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.readAsDataURL(b);
+  })`, true)
 }
 
 function parseInfo(dataUrl) {
   if (!dataUrl) return null
-  const b64 = dataUrl.split(',')[1]
-  const buf = Buffer.from(b64, 'base64')
+  const buf = Buffer.from(dataUrl.split(',')[1], 'base64')
   return { size: buf.length, head: buf.subarray(0, 8).toString('latin1') }
 }
 
@@ -61,8 +61,7 @@ async function main() {
   let target
   for (let i = 0; i < 40; i++) {
     try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json`)
-      const list = await res.json()
+      const list = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json()
       target = list.find((t) => t.type === 'page')
       if (target) break
     } catch {}
@@ -79,8 +78,7 @@ async function main() {
       if (msg.error) reject(new Error(msg.error.message))
       else resolve(msg.result)
     } else if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
-      const args = msg.params.args.map((a) => a.value ?? a.description ?? '').join(' ')
-      consoleErrors.push(args)
+      consoleErrors.push(msg.params.args.map((a) => a.value ?? a.description ?? '').join(' '))
     } else if (msg.method === 'Runtime.exceptionThrown') {
       consoleErrors.push('EXC: ' + (msg.params.exceptionDetails?.exception?.description || ''))
     }
@@ -89,7 +87,6 @@ async function main() {
 
   await send('Page.enable')
   await send('Runtime.enable')
-  // 在文档加载前 hook createObjectURL，捕获 PDF blob
   await send('Page.addScriptToEvaluateOnNewDocument', {
     source: `(() => {
       const orig = URL.createObjectURL.bind(URL);
@@ -98,58 +95,66 @@ async function main() {
         if (blob && blob.type === 'application/pdf') window.__pdfBlobs.push(blob);
         return orig(blob);
       };
+      const proto = CanvasRenderingContext2D.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'fillStyle');
+      if (desc) {
+        window.__fillStyles = [];
+        Object.defineProperty(proto, 'fillStyle', {
+          get() { return desc.get.call(this); },
+          set(v) { if (typeof v === 'string' && !window.__fillStyles.includes(v)) window.__fillStyles.push(v); desc.set.call(this, v); },
+        });
+      }
     })();`,
   })
   await send('Page.navigate', { url: URL })
-  await sleep(1500)
 
-  const { root } = await send('DOM.getDocument')
-  const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file]' })
-  await send('DOM.setFileInputFiles', { nodeId, files: [ZIP] })
-
-  let ready = false
-  for (let i = 0; i < 60; i++) {
-    const r = await send('Runtime.evaluate', { expression: `document.querySelectorAll('.net-row').length`, returnByValue: true })
-    if (r.result.value > 0) { ready = true; break }
-    await sleep(500)
+  // 等待文件输入框出现，并用 objectId 注入（避免 DOM node id 时序问题）
+  let objId = null
+  for (let i = 0; i < 40; i++) {
+    const r = await send('Runtime.evaluate', { expression: `document.querySelector('input[type=file]')` })
+    if (r.result && r.result.objectId) { objId = r.result.objectId; break }
+    await sleep(300)
   }
-  if (!ready) throw new Error('渲染未完成')
+  if (!objId) throw new Error('文件输入框未出现')
+  await send('DOM.setFileInputFiles', { objectId: objId, files: [ZIP] })
 
-  const btnEnabled = await send('Runtime.evaluate', {
-    expression: `!document.querySelector('.export-btn')?.disabled`, returnByValue: true,
-  })
-
-  // grid 布局导出
-  await send('Runtime.evaluate', { expression: `document.querySelector('.export-btn')?.click()` })
-  let gridData = null
   for (let i = 0; i < 60; i++) {
-    const r = await send('Runtime.evaluate', { expression: `window.__pdfBlobs.length`, returnByValue: true })
-    if (r.result.value >= 1) { gridData = await readBlob(0); break }
+    if ((await evalJs(`document.querySelectorAll('.net-row').length`)) > 0) break
     await sleep(500)
   }
 
-  // perPage 布局导出
-  await send('Runtime.evaluate', {
-    expression: `(() => { const s=document.querySelector('.export-select'); s.value='perPage'; s.dispatchEvent(new Event('change',{bubbles:true})); })()`,
-  })
-  await sleep(300)
-  await send('Runtime.evaluate', { expression: `document.querySelector('.export-btn')?.click()` })
-  let perData = null
+  const checked0 = await evalJs(`document.querySelectorAll('.layer-row input[type=checkbox]:checked').length`)
+  const btnText0 = await evalJs(`document.querySelector('.export-btn')?.textContent.trim()`)
+
+  // 取消勾选第一个图层
+  await evalJs(`document.querySelector('.layer-row input[type=checkbox]').click()`)
+  await sleep(200)
+  const checked1 = await evalJs(`document.querySelectorAll('.layer-row input[type=checkbox]:checked').length`)
+  const btnText1 = await evalJs(`document.querySelector('.export-btn')?.textContent.trim()`)
+
+  // 导出（默认 grid 布局）
+  await evalJs(`document.querySelector('.export-btn')?.click()`)
+  let data = null
   for (let i = 0; i < 60; i++) {
-    const r = await send('Runtime.evaluate', { expression: `window.__pdfBlobs.length`, returnByValue: true })
-    if (r.result.value >= 2) { perData = await readBlob(1); break }
+    if ((await evalJs(`window.__pdfBlobs.length`)) >= 1) { data = await readBlob(0); break }
     await sleep(500)
   }
 
-  const blobCount = await send('Runtime.evaluate', { expression: `window.__pdfBlobs.length`, returnByValue: true })
+  const fillStyles = await evalJs(`window.__fillStyles`)
+  const hasWhite = Array.isArray(fillStyles) && fillStyles.includes('#ffffff')
+  const hasDark = Array.isArray(fillStyles) && fillStyles.includes('#16283a')
+
   const shot = await send('Page.captureScreenshot', { format: 'png' })
-  writeFileSync(OUT + '/export-panel.png', Buffer.from(shot.data, 'base64'))
+  writeFileSync(OUT + '/export-white.png', Buffer.from(shot.data, 'base64'))
 
   console.log(JSON.stringify({
-    btnEnabled: btnEnabled.result.value,
-    blobCount: blobCount.result.value,
-    grid: parseInfo(gridData),
-    perPage: parseInfo(perData),
+    checkedBefore: checked0,
+    btnBefore: btnText0,
+    checkedAfterUncheck: checked1,
+    btnAfter: btnText1,
+    pdf: parseInfo(data),
+    whiteBg: hasWhite,
+    darkBgStillUsed: hasDark,
     consoleErrors,
   }, null, 2))
 }

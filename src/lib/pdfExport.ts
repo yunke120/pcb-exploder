@@ -13,10 +13,10 @@ export interface PdfLayer {
 
 export type PdfLayout = 'grid' | 'perPage'
 
-/** 深色底板（与 3D 视图背景一致），保证白色丝印等浅色层清晰可见 */
-const BG = '#16283a'
-const FG = '#eaf2f8'
-const MUTED = '#9db4c8'
+/** 白色底板（打印友好）；深色文字 */
+const BG = '#ffffff'
+const FG = '#1f3a5f'
+const MUTED = '#6b7a8a'
 /** 导出分辨率（150 DPI，打印足够清晰且体积可控） */
 const DPI = 150
 /** 中文友好的字体栈（Win7 含微软雅黑/宋体） */

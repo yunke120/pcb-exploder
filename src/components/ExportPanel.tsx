@@ -3,10 +3,11 @@ import type { PdfLayout } from '../lib/pdfExport'
 
 interface Props {
   disabled: boolean
+  count: number
   onExport: (layout: PdfLayout) => void
 }
 
-export default function ExportPanel({ disabled, onExport }: Props) {
+export default function ExportPanel({ disabled, count, onExport }: Props) {
   const [layout, setLayout] = useState<PdfLayout>('grid')
 
   return (
@@ -24,10 +25,10 @@ export default function ExportPanel({ disabled, onExport }: Props) {
         </select>
       </div>
       <button className="btn primary export-btn" disabled={disabled} onClick={() => onExport(layout)}>
-        导出 PDF
+        导出 PDF{count > 0 ? `（${count} 层）` : ''}
       </button>
       <div className="meta">
-        将全部可渲染图层导出为 PDF，含层名标签；深色底板便于观察丝印等浅色层。
+        仅导出当前勾选的图层，含层名标签；白色底色适合打印。
       </div>
     </div>
   )
