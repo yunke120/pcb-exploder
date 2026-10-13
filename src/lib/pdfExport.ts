@@ -7,6 +7,7 @@
 // 与 3D 视图的顶视方向一致、不做镜像。PDF 页默认白底，仅绘制各层图元。
 import type { OdbLayer, OdbFeature, OdbSymbol } from './odb'
 import type { GlobalBox } from './geometry'
+import type { LayerKind } from './layers'
 
 export interface PdfLayer {
   color: string
@@ -23,6 +24,25 @@ function fmt(n: number): string {
   if (!isFinite(n)) return '0'
   const v = Math.round(n * 100) / 100
   return String(v)
+}
+
+/**
+ * PDF 白底下的图层配色。3D 视图在深色背景上用浅色模拟真实 PCB（白色丝印），
+ * 但 PDF 是白底，浅色丝印/钢网几乎不可见——这里把浅色层替换为深色以保证清晰。
+ */
+function pdfColorFor(kind: LayerKind, fallback: string): string {
+  switch (kind) {
+    case 'topSilkscreen':
+      return '#1f1f1f' // 近黑（对应顶层丝印）
+    case 'bottomSilkscreen':
+      return '#4d4d4d' // 深灰（对应底层丝印，稍浅以区分顶层）
+    case 'topPaste':
+      return '#6b6b6b' // 中深灰（钢网，白底可见）
+    case 'bottomPaste':
+      return '#7d7d7d'
+    default:
+      return fallback
+  }
 }
 
 /** hex 颜色 → [r,g,b] ∈ [0,1] */
@@ -257,9 +277,10 @@ function emitFeature(g: Gfx, f: OdbFeature, syms: Record<number, OdbSymbol>) {
   }
 }
 
-/** 把一层的全部图元发射到指定 gfx（先设填充/描边颜色为图层色） */
+/** 把一层的全部图元发射到指定 gfx（先设填充/描边颜色为 PDF 专用图层色） */
 function emitLayer(g: Gfx, layer: OdbLayer, color: string) {
-  const [r, gg, b] = hexToRgb01(color)
+  const c = pdfColorFor(layer.meta.kind, color)
+  const [r, gg, b] = hexToRgb01(c)
   g.ops.push(`${fmt(r)} ${fmt(gg)} ${fmt(b)} rg`, `${fmt(r)} ${fmt(gg)} ${fmt(b)} RG`)
   for (const f of layer.features) emitFeature(g, f, layer.symbols)
 }
