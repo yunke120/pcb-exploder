@@ -270,3 +270,32 @@ input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .spacing-empty { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
 .spacing-hint { font-size: 11px; color: var(--ink-soft); opacity: 0.8; margin-top: 6px; line-height: 1.5; }
+
+/* 印制板图 / 组件图技术要求 */
+.tech-sub {
+  font-size: 11px; letter-spacing: 0.5px; color: var(--ink-soft);
+  margin: 10px 0 4px; opacity: 0.9;
+}
+.tech-item {
+  display: flex; align-items: flex-start; gap: 7px;
+  padding: 4px 6px; border-radius: 5px; font-size: 12.5px;
+  line-height: 1.45; cursor: pointer;
+}
+.tech-item:hover { background: var(--paper-2); }
+.tech-item input { accent-color: var(--accent); margin-top: 2px; flex: none; }
+.tech-item span { flex: 1; }
+.tech-custom { cursor: default; }
+.tech-custom-text { flex: 1; }
+.tech-del {
+  border: none; background: none; color: var(--ink-soft);
+  cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; flex: none;
+}
+.tech-del:hover { color: #9b2c2c; }
+.tech-add-row { margin-top: 10px; }
+.tech-input {
+  flex: 1; padding: 6px 8px; border: 1px solid var(--line);
+  border-radius: 6px; font-family: inherit; font-size: 12.5px;
+  background: #fff; color: var(--ink);
+}
+.tech-add { flex: none; }
+.tech-section .export-btn { margin-top: 10px; }

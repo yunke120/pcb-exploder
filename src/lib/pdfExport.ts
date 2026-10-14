@@ -330,12 +330,43 @@ async function deflate(data: Bytes): Promise<Bytes> {
   return out
 }
 
-/** 组装原生 PDF（字节级：对象 + xref + trailer） */
-async function buildPdf(contents: Bytes[], mediaBoxes: [number, number][]): Promise<Bytes> {
-  const N = contents.length
-  const nObj = 2 + 2 * N
-  const compressed: Uint8Array[] = []
-  for (const c of contents) compressed.push(await deflate(c))
+/** 页面内嵌的位图（RGB 8bit 原始像素，随后 Flate 压缩） */
+interface PdfImageSpec {
+  w: number
+  h: number
+  rgb: Bytes
+}
+
+/** 一页：内容流（未压缩文本）+ 媒体框 + 可选位图 */
+interface PdfPageSpec {
+  content: Bytes
+  mediaBox: [number, number]
+  image?: PdfImageSpec
+}
+
+/** 组装原生 PDF（字节级：对象 + xref + trailer），支持页面嵌入位图（技术要求文字） */
+async function buildPdf(pages: PdfPageSpec[]): Promise<Bytes> {
+  // 1) 压缩内容流与位图
+  const compressedContents: Bytes[] = []
+  const compressedImages: (Bytes | null)[] = []
+  for (const p of pages) {
+    compressedContents.push(await deflate(p.content))
+    compressedImages.push(p.image ? await deflate(p.image.rgb) : null)
+  }
+
+  // 2) 对象编号分配：1=Catalog, 2=Pages，每页 Page + Content(+Image)
+  const catalogNum = 1
+  const pagesNum = 2
+  let num = 3
+  const pageNums: number[] = []
+  const contentNums: number[] = []
+  const imageNums: (number | null)[] = []
+  for (const p of pages) {
+    pageNums.push(num++)
+    contentNums.push(num++)
+    imageNums.push(p.image ? num++ : null)
+  }
+  const nObj = num - 1
 
   // 头部：%PDF-1.4 + 二进制标记注释（4 个高字节，便于阅读器识别二进制流）。
   // 用显式字节数组构造，避免 TextEncoder 把高位字节按 UTF-8 二次编码。
@@ -346,32 +377,45 @@ async function buildPdf(contents: Bytes[], mediaBoxes: [number, number][]): Prom
     parts.push(b)
     len += b.length
   }
-  const body = (num: number, b: Uint8Array) => {
-    offsets[num] = len
-    add(enc(`${num} 0 obj\n`))
+  const body = (n: number, b: Uint8Array) => {
+    offsets[n] = len
+    add(enc(`${n} 0 obj\n`))
     add(b)
     add(enc('\nendobj\n'))
   }
 
-  body(1, enc('<< /Type /Catalog /Pages 2 0 R >>'))
-  const kids = Array.from({ length: N }, (_, i) => `${3 + i} 0 R`).join(' ')
-  body(2, enc(`<< /Type /Pages /Kids [${kids}] /Count ${N} >>`))
-  for (let i = 0; i < N; i++) {
-    const pageNum = 3 + i
-    const contNum = 3 + N + i
+  body(catalogNum, enc(`<< /Type /Catalog /Pages ${pagesNum} 0 R >>`))
+  const kids = pageNums.map((n) => `${n} 0 R`).join(' ')
+  body(pagesNum, enc(`<< /Type /Pages /Kids [${kids}] /Count ${pages.length} >>`))
+  for (let i = 0; i < pages.length; i++) {
+    const [mw, mh] = pages[i].mediaBox
+    const res = imageNums[i] != null
+      ? `/Resources << /XObject << /Im0 ${imageNums[i]} 0 R >> >> `
+      : '/Resources << >> '
     body(
-      pageNum,
-      enc(
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${fmt(mediaBoxes[i][0])} ${fmt(mediaBoxes[i][1])}] /Resources << >> /Contents ${contNum} 0 R >>`,
-      ),
+      pageNums[i],
+      enc(`<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${fmt(mw)} ${fmt(mh)}] ${res}/Contents ${contentNums[i]} 0 R >>`),
     )
-    const stream = compressed[i]
-    body(contNum, concat(enc(`<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`), stream, enc('\nendstream')))
+    body(
+      contentNums[i],
+      concat(enc(`<< /Length ${compressedContents[i].length} /Filter /FlateDecode >>\nstream\n`), compressedContents[i], enc('\nendstream')),
+    )
+    if (imageNums[i] != null) {
+      const img = pages[i].image!
+      body(
+        imageNums[i]!,
+        concat(
+          enc(`<< /Type /XObject /Subtype /Image /Width ${img.w} /Height ${img.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length ${compressedImages[i]!.length} >>\nstream\n`),
+          compressedImages[i]!,
+          enc('\nendstream'),
+        ),
+      )
+    }
   }
 
   const xrefOffset = len
   let xref = `xref\n0 ${nObj + 1}\n0000000000 65535 f \n`
-  for (let num = 1; num <= nObj; num++) xref += String(offsets[num]).padStart(10, '0') + ' 00000 n \n'
+  for (let n = 1; n <= nObj; n++) xref += String(offsets[n]).padStart(10, '0') + ' 00000 n \n'
   add(enc(xref))
   add(enc(`trailer\n<< /Size ${nObj + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`))
   return concat(...parts)
@@ -383,16 +427,14 @@ export async function buildPdfFromLayers(
   g: GlobalBox,
   layout: PdfLayout,
 ): Promise<Bytes> {
-  const contents: Bytes[] = []
-  const mediaBoxes: [number, number][] = []
+  const pages: PdfPageSpec[] = []
 
   if (layout === 'perPage') {
     const { pw, ph, p } = perPagePlacements(layers, g)
     for (const layer of layers) {
       const gfx = new Gfx(p.ox - g.minX * p.s, p.oy - g.minY * p.s, p.s)
       emitLayer(gfx, layer.odb, layer.color)
-      contents.push(enc(gfx.ops.join('\n')))
-      mediaBoxes.push([pw, ph])
+      pages.push({ content: enc(gfx.ops.join('\n')), mediaBox: [pw, ph] })
     }
   } else {
     // grid：A4 横向单页，各层按网格排布
@@ -420,11 +462,114 @@ export async function buildPdfFromLayers(
       const gfx = new Gfx(imgX - g.minX * s, imgY - g.minY * s, s, ops)
       emitLayer(gfx, layers[i].odb, layers[i].color)
     }
-    contents.push(enc(ops.join('\n')))
-    mediaBoxes.push([pw, ph])
+    pages.push({ content: enc(ops.join('\n')), mediaBox: [pw, ph] })
   }
 
-  return buildPdf(contents, mediaBoxes)
+  return buildPdf(pages)
+}
+
+// ---------- 技术要求文字页（中文，canvas 渲染为位图嵌入） ----------
+
+export interface TechRequirement {
+  title: string
+  items: string[]
+}
+
+/** 技术要求文字位图：A4 竖版，白底深字，中文由浏览器 canvas 渲染，规避 CJK 字体嵌入 */
+function renderTechBitmap(
+  title: string,
+  items: string[],
+  scale = 3,
+): { ptW: number; ptH: number; pxW: number; pxH: number; rgb: Bytes } | null {
+  if (typeof document === 'undefined' || !document.createElement) return null
+  const ptW = 595.28
+  const ptH = 841.89
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(ptW * scale)
+  canvas.height = Math.round(ptH * scale)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.scale(scale, scale)
+
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, ptW, ptH)
+  ctx.fillStyle = '#1f3a5f'
+  ctx.textBaseline = 'alphabetic'
+
+  ctx.font = 'bold 20pt "Microsoft YaHei", "PingFang SC", sans-serif'
+  ctx.fillText(title, 50, 58)
+  ctx.strokeStyle = '#1f3a5f'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(50, 76)
+  ctx.lineTo(ptW - 50, 76)
+  ctx.stroke()
+
+  ctx.font = '11pt "Microsoft YaHei", "PingFang SC", sans-serif'
+  const maxW = ptW - 100
+  let y = 100
+  const lineH = 16
+  for (let idx = 0; idx < items.length; idx++) {
+    const text = `${idx + 1}. ${items[idx]}`
+    const lines = wrapText(ctx, text, maxW)
+    for (const line of lines) {
+      if (y > ptH - 60) return finish() // 超出页面，截断
+      ctx.fillText(line, 50, y)
+      y += lineH
+    }
+    y += 6
+  }
+
+  function finish(): { ptW: number; ptH: number; pxW: number; pxH: number; rgb: Bytes } {
+    const img = ctx!.getImageData(0, 0, canvas.width, canvas.height)
+    const rgb = new Uint8Array(canvas.width * canvas.height * 3)
+    for (let i = 0, j = 0; i < img.data.length; i += 4, j += 3) {
+      rgb[j] = img.data[i]
+      rgb[j + 1] = img.data[i + 1]
+      rgb[j + 2] = img.data[i + 2]
+    }
+    return { ptW, ptH, pxW: canvas.width, pxH: canvas.height, rgb }
+  }
+  return finish()
+}
+
+/** 按画布测量宽度对文本逐字换行 */
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
+  const lines: string[] = []
+  let cur = ''
+  for (const ch of text) {
+    if (cur && ctx.measureText(cur + ch).width > maxW) {
+      lines.push(cur)
+      cur = ch
+    } else {
+      cur += ch
+    }
+  }
+  if (cur) lines.push(cur)
+  return lines
+}
+
+/** 印制板图 / 组件图：首页技术要求 + 每层一页（矢量图元） */
+export async function buildPcbPdf(layers: PdfLayer[], g: GlobalBox, tech: TechRequirement): Promise<Bytes> {
+  const pages: PdfPageSpec[] = []
+
+  const bmp = renderTechBitmap(tech.title, tech.items)
+  if (bmp) {
+    pages.push({
+      mediaBox: [bmp.ptW, bmp.ptH],
+      content: enc(`q\n${fmt(bmp.ptW)} 0 0 ${fmt(bmp.ptH)} 0 0 cm\n/Im0 Do\nQ`),
+      image: { w: bmp.pxW, h: bmp.pxH, rgb: bmp.rgb },
+    })
+  }
+
+  const { pw, ph, p } = perPagePlacements(layers, g)
+  for (const layer of layers) {
+    const gfx = new Gfx(p.ox - g.minX * p.s, p.oy - g.minY * p.s, p.s)
+    emitLayer(gfx, layer.odb, layer.color)
+    pages.push({ content: enc(gfx.ops.join('\n')), mediaBox: [pw, ph] })
+  }
+
+  return buildPdf(pages)
 }
 
 function stamp(): string {
@@ -436,15 +581,17 @@ function stamp(): string {
 /** 导出图层为原生矢量 PDF 并触发下载 */
 export async function exportLayersPdf(
   layers: PdfLayer[],
-  opts: { g: GlobalBox; layout: PdfLayout },
+  opts: { g: GlobalBox; layout: PdfLayout; tech?: TechRequirement; prefix?: string },
 ): Promise<void> {
   if (layers.length === 0) return
-  const pdf = await buildPdfFromLayers(layers, opts.g, opts.layout)
+  const pdf = opts.tech
+    ? await buildPcbPdf(layers, opts.g, opts.tech)
+    : await buildPdfFromLayers(layers, opts.g, opts.layout)
   const blob = new Blob([pdf], { type: 'application/pdf' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `pcb-layers-${stamp()}.pdf`
+  a.download = `${opts.prefix ?? 'pcb-layers'}-${stamp()}.pdf`
   document.body.appendChild(a)
   a.click()
   a.remove()

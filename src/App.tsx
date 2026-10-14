@@ -5,7 +5,9 @@ import LayerPanel from './components/LayerPanel'
 import NetPanel from './components/NetPanel'
 import ExplosionView from './components/ExplosionView'
 import ExportPanel from './components/ExportPanel'
+import TechPanel, { type TechOption } from './components/TechPanel'
 import { exportLayersPdf, type PdfLayout, type PdfLayer } from './lib/pdfExport'
+import { PCB_TECH_PRESETS, ASSEMBLY_TECH_PRESETS, pcbAutoSuggestions } from './lib/tech'
 import { type LayerMeta } from './lib/layers'
 import { computeGlobalBox, type ViewBox, type GlobalBox } from './lib/geometry'
 import { type Net } from './lib/nets'
@@ -209,6 +211,13 @@ export default function App() {
   const [spacingResults, setSpacingResults] = useState<SpacingResult[]>([])
   const [spacingPair, setSpacingPair] = useState<[string, string] | null>(null)
 
+  // 印制板图 / 组件图技术要求
+  const [pcbAuto, setPcbAuto] = useState<string[]>([])
+  const [pcbSelected, setPcbSelected] = useState<Set<string>>(new Set())
+  const [pcbCustom, setPcbCustom] = useState<string[]>([])
+  const [assemblySelected, setAssemblySelected] = useState<Set<string>>(new Set())
+  const [assemblyCustom, setAssemblyCustom] = useState<string[]>([])
+
   // 选中数不是 2 时清空旧结果（避免残留标注）
   useEffect(() => {
     if (selectedNets.size !== 2) {
@@ -325,6 +334,17 @@ export default function App() {
     setSelectedNets(new Set())
     setNetOverlays({})
     setVisible(new Set(withTex.map((t) => t.id)))
+
+    // 技术要求：自动生成建议（印制板图）+ 默认全选预置条目，自定义条目清空
+    const copperLayers = design.layers.filter((l) =>
+      l.meta.kind === 'topCopper' || l.meta.kind === 'bottomCopper' || l.meta.kind === 'innerCopper',
+    ).length
+    const auto = pcbAutoSuggestions(g, copperLayers)
+    setPcbAuto(auto)
+    setPcbSelected(new Set([...auto, ...PCB_TECH_PRESETS]))
+    setPcbCustom([])
+    setAssemblySelected(new Set(ASSEMBLY_TECH_PRESETS))
+    setAssemblyCustom([])
   }, [netOverlays])
 
   const handleFiles = useCallback(
@@ -352,25 +372,87 @@ export default function App() {
     })
   }, [])
 
-  // 导出当前勾选（可见）的可渲染图层为原生矢量 PDF
+  // 收集当前勾选（可见）的可渲染图层，按堆叠顺序排列为 PdfLayer[]
+  const collectExportLayers = useCallback((): PdfLayer[] => {
+    return itemsRef.current
+      .filter((i) => i.odb && i.texture && visible.has(i.id))
+      .sort((a, b) => a.meta.order - b.meta.order)
+      .map((i) => ({ color: i.meta.color, odb: i.odb! }))
+  }, [visible])
+
+  // 导出当前勾选图层为原生矢量 PDF（无技术要求）
   const exportPdf = useCallback(
     (layout: PdfLayout) => {
-      const renderable = itemsRef.current
-        .filter((i) => i.odb && i.texture && visible.has(i.id))
-        .sort((a, b) => a.meta.order - b.meta.order)
-      if (renderable.length === 0) return
       const g = gbRef.current
-      if (!g) return
-      const layers: PdfLayer[] = renderable.map((i) => ({
-        color: i.meta.color,
-        odb: i.odb!,
-      }))
+      const layers = collectExportLayers()
+      if (!g || layers.length === 0) return
       exportLayersPdf(layers, { g, layout }).catch((e) => {
         console.error('PDF 导出失败:', e)
         setError('PDF 导出失败：' + (e as Error).message)
       })
     },
-    [visible],
+    [collectExportLayers],
+  )
+
+  // 印制板图 / 组件图技术要求可选项（顺序：自动 → 通用要求）
+  const pcbOptions = useMemo<TechOption[]>(
+    () => [
+      ...pcbAuto.map((t) => ({ text: t, source: 'auto' as const })),
+      ...PCB_TECH_PRESETS.map((t) => ({ text: t, source: 'preset' as const })),
+    ],
+    [pcbAuto],
+  )
+  const assemblyOptions = useMemo<TechOption[]>(
+    () => ASSEMBLY_TECH_PRESETS.map((t) => ({ text: t, source: 'preset' as const })),
+    [],
+  )
+
+  const togglePcb = useCallback((text: string) => {
+    setPcbSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(text)) next.delete(text)
+      else next.add(text)
+      return next
+    })
+  }, [])
+  const toggleAssembly = useCallback((text: string) => {
+    setAssemblySelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(text)) next.delete(text)
+      else next.add(text)
+      return next
+    })
+  }, [])
+  const addPcbCustom = useCallback((text: string) => setPcbCustom((p) => [...p, text]), [])
+  const removePcbCustom = useCallback((idx: number) => setPcbCustom((p) => p.filter((_, i) => i !== idx)), [])
+  const addAssemblyCustom = useCallback((text: string) => setAssemblyCustom((p) => [...p, text]), [])
+  const removeAssemblyCustom = useCallback((idx: number) => setAssemblyCustom((p) => p.filter((_, i) => i !== idx)), [])
+
+  /** 导出带技术要求的 PDF（印制板图 / 组件图共用） */
+  const exportTechPdf = useCallback(
+    (options: TechOption[], selected: Set<string>, custom: string[], title: string, prefix: string) => {
+      const g = gbRef.current
+      const layers = collectExportLayers()
+      if (!g || layers.length === 0) return
+      const items = [...options.map((o) => o.text).filter((t) => selected.has(t)), ...custom]
+      if (items.length === 0) {
+        setError('请至少选择一条技术要求后再导出')
+        return
+      }
+      exportLayersPdf(layers, { g, layout: 'perPage', tech: { title, items }, prefix }).catch((e) => {
+        console.error('导出失败:', e)
+        setError('导出失败：' + (e as Error).message)
+      })
+    },
+    [collectExportLayers],
+  )
+  const exportPcb = useCallback(
+    () => exportTechPdf(pcbOptions, pcbSelected, pcbCustom, '印制板图技术要求', '印制板图'),
+    [exportTechPdf, pcbOptions, pcbSelected, pcbCustom],
+  )
+  const exportAssembly = useCallback(
+    () => exportTechPdf(assemblyOptions, assemblySelected, assemblyCustom, '组件图技术要求', '组件图'),
+    [exportTechPdf, assemblyOptions, assemblySelected, assemblyCustom],
   )
 
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
@@ -464,6 +546,24 @@ export default function App() {
           disabled={visibleItems.length === 0}
           count={visibleItems.length}
           onExport={exportPdf}
+        />
+        <TechPanel
+          disabled={visibleItems.length === 0}
+          layerCount={visibleItems.length}
+          pcbOptions={pcbOptions}
+          pcbSelected={pcbSelected}
+          onPcbToggle={togglePcb}
+          pcbCustom={pcbCustom}
+          onPcbAddCustom={addPcbCustom}
+          onPcbRemoveCustom={removePcbCustom}
+          onExportPcb={exportPcb}
+          assemblyOptions={assemblyOptions}
+          assemblySelected={assemblySelected}
+          onAssemblyToggle={toggleAssembly}
+          assemblyCustom={assemblyCustom}
+          onAssemblyAddCustom={addAssemblyCustom}
+          onAssemblyRemoveCustom={removeAssemblyCustom}
+          onExportAssembly={exportAssembly}
         />
         <LayerPanel
           items={items}
