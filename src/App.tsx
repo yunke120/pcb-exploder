@@ -5,7 +5,7 @@ import LayerPanel from './components/LayerPanel'
 import NetPanel from './components/NetPanel'
 import ExplosionView from './components/ExplosionView'
 import ExportPanel from './components/ExportPanel'
-import TechPanel, { type TechOption } from './components/TechPanel'
+import TechPanel from './components/TechPanel'
 import { exportLayersPdf, type PdfLayout, type PdfLayer } from './lib/pdfExport'
 import { PCB_TECH_PRESETS, ASSEMBLY_TECH_PRESETS, pcbAutoSuggestions } from './lib/tech'
 import { type LayerMeta } from './lib/layers'
@@ -211,12 +211,14 @@ export default function App() {
   const [spacingResults, setSpacingResults] = useState<SpacingResult[]>([])
   const [spacingPair, setSpacingPair] = useState<[string, string] | null>(null)
 
-  // 印制板图 / 组件图技术要求
+  // 印制板图 / 组件图技术要求（选择键：自动项 a:<idx>、预置项 p:<idx>）
   const [pcbAuto, setPcbAuto] = useState<string[]>([])
   const [pcbSelected, setPcbSelected] = useState<Set<string>>(new Set())
   const [pcbCustom, setPcbCustom] = useState<string[]>([])
   const [assemblySelected, setAssemblySelected] = useState<Set<string>>(new Set())
   const [assemblyCustom, setAssemblyCustom] = useState<string[]>([])
+  /** 轻提示（如复制成功），自动清除 */
+  const [notice, setNotice] = useState<string | null>(null)
 
   // 选中数不是 2 时清空旧结果（避免残留标注）
   useEffect(() => {
@@ -225,6 +227,13 @@ export default function App() {
       setSpacingPair(null)
     }
   }, [selectedNets])
+
+  // 轻提示自动清除
+  useEffect(() => {
+    if (!notice) return
+    const t = setTimeout(() => setNotice(null), 2500)
+    return () => clearTimeout(t)
+  }, [notice])
 
   /** 计算两个选中网络在每一层（两网同时存在）的最小间距 */
   const computeSpacing = useCallback(() => {
@@ -341,9 +350,9 @@ export default function App() {
     ).length
     const auto = pcbAutoSuggestions(g, copperLayers)
     setPcbAuto(auto)
-    setPcbSelected(new Set([...auto, ...PCB_TECH_PRESETS]))
+    setPcbSelected(new Set([...auto.map((_, i) => `a:${i}`), ...PCB_TECH_PRESETS.map((_, i) => `p:${i}`)]))
     setPcbCustom([])
-    setAssemblySelected(new Set(ASSEMBLY_TECH_PRESETS))
+    setAssemblySelected(new Set(ASSEMBLY_TECH_PRESETS.map((_, i) => `p:${i}`)))
     setAssemblyCustom([])
   }, [netOverlays])
 
@@ -394,32 +403,26 @@ export default function App() {
     [collectExportLayers],
   )
 
-  // 印制板图 / 组件图技术要求可选项（顺序：自动 → 通用要求）
-  const pcbOptions = useMemo<TechOption[]>(
-    () => [
-      ...pcbAuto.map((t) => ({ text: t, source: 'auto' as const })),
-      ...PCB_TECH_PRESETS.map((t) => ({ text: t, source: 'preset' as const })),
-    ],
-    [pcbAuto],
-  )
-  const assemblyOptions = useMemo<TechOption[]>(
-    () => ASSEMBLY_TECH_PRESETS.map((t) => ({ text: t, source: 'preset' as const })),
-    [],
-  )
-
-  const togglePcb = useCallback((text: string) => {
+  const togglePcb = useCallback((id: string) => {
     setPcbSelected((prev) => {
       const next = new Set(prev)
-      if (next.has(text)) next.delete(text)
-      else next.add(text)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
       return next
     })
   }, [])
-  const toggleAssembly = useCallback((text: string) => {
+  const toggleAssembly = useCallback((id: string) => {
     setAssemblySelected((prev) => {
       const next = new Set(prev)
-      if (next.has(text)) next.delete(text)
-      else next.add(text)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+  const editPcbAuto = useCallback((index: number, text: string) => {
+    setPcbAuto((prev) => {
+      const next = [...prev]
+      next[index] = text
       return next
     })
   }, [])
@@ -428,32 +431,124 @@ export default function App() {
   const addAssemblyCustom = useCallback((text: string) => setAssemblyCustom((p) => [...p, text]), [])
   const removeAssemblyCustom = useCallback((idx: number) => setAssemblyCustom((p) => p.filter((_, i) => i !== idx)), [])
 
-  /** 导出带技术要求的 PDF（印制板图 / 组件图共用） */
-  const exportTechPdf = useCallback(
-    (options: TechOption[], selected: Set<string>, custom: string[], title: string, prefix: string) => {
-      const g = gbRef.current
-      const layers = collectExportLayers()
-      if (!g || layers.length === 0) return
-      const items = [...options.map((o) => o.text).filter((t) => selected.has(t)), ...custom]
-      if (items.length === 0) {
-        setError('请至少选择一条技术要求后再导出')
-        return
-      }
-      exportLayersPdf(layers, { g, layout: 'perPage', tech: { title, items }, prefix }).catch((e) => {
-        console.error('导出失败:', e)
-        setError('导出失败：' + (e as Error).message)
-      })
-    },
-    [collectExportLayers],
-  )
-  const exportPcb = useCallback(
-    () => exportTechPdf(pcbOptions, pcbSelected, pcbCustom, '印制板图技术要求', '印制板图'),
-    [exportTechPdf, pcbOptions, pcbSelected, pcbCustom],
-  )
-  const exportAssembly = useCallback(
-    () => exportTechPdf(assemblyOptions, assemblySelected, assemblyCustom, '组件图技术要求', '组件图'),
-    [exportTechPdf, assemblyOptions, assemblySelected, assemblyCustom],
-  )
+  // ---- 复制技术要求：仅复制勾选条目（自动 + 预置）+ 全部自定义 ----
+  const copyText = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    }
+  }, [])
+
+  const buildPcbCopyText = useCallback((): string => {
+    const lines: string[] = []
+    pcbAuto.forEach((t, i) => {
+      if (pcbSelected.has(`a:${i}`)) lines.push(t)
+    })
+    PCB_TECH_PRESETS.forEach((t, i) => {
+      if (pcbSelected.has(`p:${i}`)) lines.push(t)
+    })
+    lines.push(...pcbCustom)
+    return lines.map((t, i) => `${i + 1}. ${t}`).join('\n')
+  }, [pcbAuto, pcbSelected, pcbCustom])
+
+  const buildAssemblyCopyText = useCallback((): string => {
+    const lines: string[] = []
+    ASSEMBLY_TECH_PRESETS.forEach((t, i) => {
+      if (assemblySelected.has(`p:${i}`)) lines.push(t)
+    })
+    lines.push(...assemblyCustom)
+    return lines.map((t, i) => `${i + 1}. ${t}`).join('\n')
+  }, [assemblySelected, assemblyCustom])
+
+  const copyPcb = useCallback(() => {
+    const text = buildPcbCopyText()
+    const n = text.split('\n').filter(Boolean).length
+    if (n === 0) return
+    copyText(text).then(() => {
+      setNotice(`已复制 ${n} 条印制板图技术要求`)
+    })
+  }, [buildPcbCopyText, copyText])
+
+  const copyAssembly = useCallback(() => {
+    const text = buildAssemblyCopyText()
+    const n = text.split('\n').filter(Boolean).length
+    if (n === 0) return
+    copyText(text).then(() => {
+      setNotice(`已复制 ${n} 条组件图技术要求`)
+    })
+  }, [buildAssemblyCopyText, copyText])
+
+  const pcbCopyCount = useMemo(() => {
+    let n = pcbCustom.length
+    pcbAuto.forEach((_, i) => {
+      if (pcbSelected.has(`a:${i}`)) n++
+    })
+    PCB_TECH_PRESETS.forEach((_, i) => {
+      if (pcbSelected.has(`p:${i}`)) n++
+    })
+    return n
+  }, [pcbAuto, pcbSelected, pcbCustom])
+
+  const assemblyCopyCount = useMemo(() => {
+    let n = assemblyCustom.length
+    ASSEMBLY_TECH_PRESETS.forEach((_, i) => {
+      if (assemblySelected.has(`p:${i}`)) n++
+    })
+    return n
+  }, [assemblySelected, assemblyCustom])
+
+  // ---- 导出：印制板图 = 全部铜箔层（含负片）；组件图 = 顶/底丝印（底层翻转 180°） ----
+  const isCopperKind = (k: string) => k === 'topCopper' || k === 'bottomCopper' || k === 'innerCopper'
+  const exportPcb = useCallback(() => {
+    const g = gbRef.current
+    if (!g) return
+    const copper = itemsRef.current
+      .filter((i) => i.odb && i.texture && isCopperKind(i.meta.kind))
+      .sort((a, b) => a.meta.order - b.meta.order)
+      .map((i) => ({ color: i.meta.color, odb: i.odb! }))
+    if (copper.length === 0) {
+      setError('未解析到铜箔层，无法导出印制板图')
+      return
+    }
+    exportLayersPdf(copper, { g, layout: 'perPage', prefix: '印制板图' }).catch((e) => {
+      console.error('印制板图导出失败:', e)
+      setError('印制板图导出失败：' + (e as Error).message)
+    })
+  }, [])
+
+  const exportAssembly = useCallback(() => {
+    const g = gbRef.current
+    if (!g) return
+    const silks = itemsRef.current
+      .filter((i) => i.odb && i.texture && (i.meta.kind === 'topSilkscreen' || i.meta.kind === 'bottomSilkscreen'))
+      .sort((a, b) => a.meta.order - b.meta.order)
+      .map((i) => ({ color: i.meta.color, odb: i.odb!, rotate180: i.meta.kind === 'bottomSilkscreen' }))
+    if (silks.length === 0) {
+      setError('未解析到丝印层，无法导出组件图')
+      return
+    }
+    exportLayersPdf(silks, { g, layout: 'perPage', prefix: '组件图' }).catch((e) => {
+      console.error('组件图导出失败:', e)
+      setError('组件图导出失败：' + (e as Error).message)
+    })
+  }, [])
+
+  const pcbExportLabel = useMemo(() => {
+    const n = items.filter((i) => i.texture && isCopperKind(i.meta.kind)).length
+    return n > 0 ? `导出印制板图（${n} 层铜箔）` : '导出印制板图'
+  }, [items])
+  const assemblyExportLabel = useMemo(() => {
+    const n = items.filter((i) => i.texture && (i.meta.kind === 'topSilkscreen' || i.meta.kind === 'bottomSilkscreen')).length
+    return n > 0 ? `导出组件图（${n} 层丝印）` : '导出组件图'
+  }, [items])
 
   const visibleItems = items.filter((i) => i.texture && visible.has(i.id))
   const hasRenderable = items.some((i) => i.texture)
@@ -542,28 +637,36 @@ export default function App() {
             {error}
           </div>
         )}
+        {notice && (
+          <div className="section notice">{notice}</div>
+        )}
         <ExportPanel
           disabled={visibleItems.length === 0}
           count={visibleItems.length}
           onExport={exportPdf}
         />
         <TechPanel
-          disabled={visibleItems.length === 0}
-          layerCount={visibleItems.length}
-          pcbOptions={pcbOptions}
+          disabled={!hasRenderable}
+          pcbAuto={pcbAuto}
+          onPcbEditAuto={editPcbAuto}
           pcbSelected={pcbSelected}
           onPcbToggle={togglePcb}
           pcbCustom={pcbCustom}
           onPcbAddCustom={addPcbCustom}
           onPcbRemoveCustom={removePcbCustom}
+          pcbExportLabel={pcbExportLabel}
           onExportPcb={exportPcb}
-          assemblyOptions={assemblyOptions}
+          pcbCopyCount={pcbCopyCount}
+          onCopyPcb={copyPcb}
           assemblySelected={assemblySelected}
           onAssemblyToggle={toggleAssembly}
           assemblyCustom={assemblyCustom}
           onAssemblyAddCustom={addAssemblyCustom}
           onAssemblyRemoveCustom={removeAssemblyCustom}
+          assemblyExportLabel={assemblyExportLabel}
           onExportAssembly={exportAssembly}
+          assemblyCopyCount={assemblyCopyCount}
+          onCopyAssembly={copyAssembly}
         />
         <LayerPanel
           items={items}

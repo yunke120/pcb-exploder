@@ -1,7 +1,7 @@
 // PDF 导出（原生矢量版）：直接从 ODB++ 解析出的图元生成原生 PDF，
 // 不经 SVG / svg2pdf / jsPDF 等中间层——图元以 PDF 路径运算符写入，
 // 铺铜内孔用 evenodd 填充（`f*`），焊盘用贝塞尔圆/椭圆，走线/圆弧用带宽度描边。
-// 内容流用 FlateDecode 压缩，纯矢量、放大不失真。
+// 内容流用 FlateDecode 压缩，纯矢量、放大不失真。导出不包含任何文字/技术要求标注。
 //
 // 坐标系：板坐标（mm，y 轴向上）直接映射到 PDF 用户空间（pt，y 轴向上），
 // 与 3D 视图的顶视方向一致、不做镜像。PDF 页默认白底，仅绘制各层图元。
@@ -12,6 +12,8 @@ import type { LayerKind } from './layers'
 export interface PdfLayer {
   color: string
   odb: OdbLayer
+  /** 导出时旋转 180°（用于底层丝印：翻转后按可读方向呈现） */
+  rotate180?: boolean
 }
 
 export type PdfLayout = 'grid' | 'perPage'
@@ -88,6 +90,10 @@ class Gfx {
   P(x: number, y: number): string {
     return `${fmt(this.ax + x * this.s)} ${fmt(this.ay + y * this.s)}`
   }
+  /** 板坐标点 → PDF 坐标数值 [px, py] */
+  pt(x: number, y: number): [number, number] {
+    return [this.ax + x * this.s, this.ay + y * this.s]
+  }
   /** 板坐标长度(mm) → pt 数值 */
   W(mm: number): string {
     return fmt(mm * this.s)
@@ -143,7 +149,18 @@ function emitPolygon(g: Gfx, pts: number[][]) {
   g.ops.push('h')
 }
 
-/** 圆角矩形（四角各一段 90° 圆弧贝塞尔），追加整条闭合路径 */
+/** 矩形路径（不含 fill） */
+function emitRectPath(g: Gfx, x0: number, y0: number, w: number, h: number) {
+  g.ops.push(
+    `${g.P(x0, y0)} m`,
+    `${g.P(x0 + w, y0)} l`,
+    `${g.P(x0 + w, y0 + h)} l`,
+    `${g.P(x0, y0 + h)} l`,
+    'h',
+  )
+}
+
+/** 圆角矩形（四角各一段 90° 圆弧贝塞尔），追加整条闭合路径（不含 fill） */
 function emitRoundedRect(g: Gfx, x0: number, y0: number, w: number, h: number, r: number) {
   g.ops.push(`${g.P(x0 + r, y0)} m`, `${g.P(x0 + w - r, y0)} l`)
   emitArcSegs(g, x0 + w - r, y0 + r, r, -Math.PI / 2, Math.PI / 2)
@@ -156,8 +173,8 @@ function emitRoundedRect(g: Gfx, x0: number, y0: number, w: number, h: number, r
   g.ops.push('h')
 }
 
-/** 八角形（平顶/平底），追加闭合路径 + `f` */
-function emitOctagon(g: Gfx, cx: number, cy: number, w: number, h: number) {
+/** 八角形（平顶/平底）路径（不含 fill） */
+function emitOctagonPath(g: Gfx, cx: number, cy: number, w: number, h: number) {
   const hw = w / 2
   const hh = h / 2
   const cw = hw * 0.7071
@@ -172,17 +189,15 @@ function emitOctagon(g: Gfx, cx: number, cy: number, w: number, h: number) {
     [cx - hw, cy + hh - ch],
     [cx - hw, cy - hh + ch],
   ])
-  g.ops.push('f')
 }
 
-/** 焊盘符号 → 填充路径 */
-function emitSymbol(g: Gfx, sym: OdbSymbol, x: number, y: number) {
+/** 焊盘符号 → 闭合路径（不含 fill；donut 画内外两圆） */
+function emitSymbolPath(g: Gfx, sym: OdbSymbol, x: number, y: number) {
   switch (sym.kind) {
     case 'round':
     case 'unknown': {
       const r = (sym.d ?? sym.w) / 2
       emitEllipse(g, x, y, r, r)
-      g.ops.push('f')
       break
     }
     case 'square':
@@ -193,36 +208,32 @@ function emitSymbol(g: Gfx, sym: OdbSymbol, x: number, y: number) {
       const x0 = x - w / 2
       const y0 = y - h / 2
       if (r <= 0) {
-        g.ops.push(
-          `${g.P(x0, y0)} m`,
-          `${g.P(x0 + w, y0)} l`,
-          `${g.P(x0 + w, y0 + h)} l`,
-          `${g.P(x0, y0 + h)} l`,
-          'h',
-          'f',
-        )
+        emitRectPath(g, x0, y0, w, h)
       } else {
         emitRoundedRect(g, x0, y0, w, h, r)
-        g.ops.push('f')
       }
       break
     }
     case 'oval':
       emitEllipse(g, x, y, sym.w / 2, sym.h / 2)
-      g.ops.push('f')
       break
     case 'oct':
-      emitOctagon(g, x, y, sym.w, sym.h)
+      emitOctagonPath(g, x, y, sym.w, sym.h)
       break
     case 'donut': {
       const outer = (sym.d ?? sym.w) / 2
       const inner = (sym.inner ?? outer * 0.5) / 2
       emitEllipse(g, x, y, outer, outer)
       emitEllipse(g, x, y, inner, inner)
-      g.ops.push('f*')
       break
     }
   }
+}
+
+/** 焊盘符号 → 填充路径（donut 用 evenodd `f*`，其余 `f`） */
+function emitSymbol(g: Gfx, sym: OdbSymbol, x: number, y: number) {
+  emitSymbolPath(g, sym, x, y)
+  g.ops.push(sym.kind === 'donut' ? 'f*' : 'f')
 }
 
 /** 单个图元 → 路径/描边运算符（负极性 N 图元为挖空，样例中不存在，暂跳过） */
@@ -277,12 +288,50 @@ function emitFeature(g: Gfx, f: OdbFeature, syms: Record<number, OdbSymbol>) {
   }
 }
 
-/** 把一层的全部图元发射到指定 gfx（先设填充/描边颜色为 PDF 专用图层色） */
-function emitLayer(g: Gfx, layer: OdbLayer, color: string) {
+/** 图层发射选项 */
+interface EmitOpts {
+  /** 是否旋转 180°（绕 rotateCenter） */
+  rotate180?: boolean
+  /** 180° 旋转中心（板坐标），rotate180 时必填 */
+  center?: [number, number]
+  /** 全局板框（负片层渲染用） */
+  board?: GlobalBox
+}
+
+/**
+ * 把一层图元发射到指定 gfx。
+ * - 常规正片层：逐图元填充/描边；
+ * - 负片层（layer.polarity === 'NEGATIVE'）：铜箔 = 板框 减去 图元（空隙），
+ *   用 evenodd（外框 + 空隙轮廓）一次填充。
+ */
+function emitLayer(g: Gfx, layer: OdbLayer, color: string, opts: EmitOpts = {}) {
   const c = pdfColorFor(layer.meta.kind, color)
   const [r, gg, b] = hexToRgb01(c)
+
+  if (opts.rotate180 && opts.center) {
+    const [px, py] = g.pt(opts.center[0], opts.center[1])
+    g.ops.push('q', `-1 0 0 -1 ${fmt(2 * px)} ${fmt(2 * py)} cm`)
+  }
+
   g.ops.push(`${fmt(r)} ${fmt(gg)} ${fmt(b)} rg`, `${fmt(r)} ${fmt(gg)} ${fmt(b)} RG`)
-  for (const f of layer.features) emitFeature(g, f, layer.symbols)
+
+  if (layer.polarity === 'NEGATIVE' && opts.board) {
+    emitRectPath(g, opts.board.minX, opts.board.minY, opts.board.w, opts.board.h)
+    for (const f of layer.features) {
+      if (f.kind === 'surface' && f.poly) {
+        emitPolygon(g, f.poly)
+        if (f.holes) for (const h of f.holes) if (h.length >= 3) emitPolygon(g, h)
+      } else if (f.kind === 'pad' && f.x != null && f.y != null) {
+        const sym = layer.symbols[f.symbol]
+        if (sym) emitSymbolPath(g, sym, f.x, f.y)
+      }
+    }
+    g.ops.push('f*')
+  } else {
+    for (const f of layer.features) emitFeature(g, f, layer.symbols)
+  }
+
+  if (opts.rotate180 && opts.center) g.ops.push('Q')
 }
 
 // ---------- 布局 ----------
@@ -292,7 +341,7 @@ interface Placed {
   s: number
 }
 
-function perPagePlacements(layers: PdfLayer[], g: GlobalBox): { pw: number; ph: number; p: Placed } {
+function perPagePlacements(g: GlobalBox): { pw: number; ph: number; p: Placed } {
   const long = 800
   const margin = 20
   const aspect = g.w / g.h || 1
@@ -301,7 +350,6 @@ function perPagePlacements(layers: PdfLayer[], g: GlobalBox): { pw: number; ph: 
   const s = Math.min((pw - 2 * margin) / g.w, (ph - 2 * margin) / g.h)
   const ox = (pw - g.w * s) / 2
   const oy = (ph - g.h * s) / 2
-  void layers
   return { pw, ph, p: { ox, oy, s } }
 }
 
@@ -330,46 +378,28 @@ async function deflate(data: Bytes): Promise<Bytes> {
   return out
 }
 
-/** 页面内嵌的位图（RGB 8bit 原始像素，随后 Flate 压缩） */
-interface PdfImageSpec {
-  w: number
-  h: number
-  rgb: Bytes
-}
-
-/** 一页：内容流（未压缩文本）+ 媒体框 + 可选位图 */
+/** 一页：内容流（未压缩文本）+ 媒体框 */
 interface PdfPageSpec {
   content: Bytes
   mediaBox: [number, number]
-  image?: PdfImageSpec
 }
 
-/** 组装原生 PDF（字节级：对象 + xref + trailer），支持页面嵌入位图（技术要求文字） */
+/** 组装原生 PDF（字节级：对象 + xref + trailer），纯矢量、无文字标注 */
 async function buildPdf(pages: PdfPageSpec[]): Promise<Bytes> {
-  // 1) 压缩内容流与位图
-  const compressedContents: Bytes[] = []
-  const compressedImages: (Bytes | null)[] = []
-  for (const p of pages) {
-    compressedContents.push(await deflate(p.content))
-    compressedImages.push(p.image ? await deflate(p.image.rgb) : null)
-  }
+  const compressed: Bytes[] = []
+  for (const p of pages) compressed.push(await deflate(p.content))
 
-  // 2) 对象编号分配：1=Catalog, 2=Pages，每页 Page + Content(+Image)
   const catalogNum = 1
   const pagesNum = 2
   let num = 3
   const pageNums: number[] = []
   const contentNums: number[] = []
-  const imageNums: (number | null)[] = []
-  for (const p of pages) {
+  for (let i = 0; i < pages.length; i++) {
     pageNums.push(num++)
     contentNums.push(num++)
-    imageNums.push(p.image ? num++ : null)
   }
   const nObj = num - 1
 
-  // 头部：%PDF-1.4 + 二进制标记注释（4 个高字节，便于阅读器识别二进制流）。
-  // 用显式字节数组构造，避免 TextEncoder 把高位字节按 UTF-8 二次编码。
   const parts: Uint8Array[] = [new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a, 0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a])]
   let len = parts[0].length
   const offsets: number[] = new Array(nObj + 1).fill(0)
@@ -389,28 +419,14 @@ async function buildPdf(pages: PdfPageSpec[]): Promise<Bytes> {
   body(pagesNum, enc(`<< /Type /Pages /Kids [${kids}] /Count ${pages.length} >>`))
   for (let i = 0; i < pages.length; i++) {
     const [mw, mh] = pages[i].mediaBox
-    const res = imageNums[i] != null
-      ? `/Resources << /XObject << /Im0 ${imageNums[i]} 0 R >> >> `
-      : '/Resources << >> '
     body(
       pageNums[i],
-      enc(`<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${fmt(mw)} ${fmt(mh)}] ${res}/Contents ${contentNums[i]} 0 R >>`),
+      enc(`<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${fmt(mw)} ${fmt(mh)}] /Resources << >> /Contents ${contentNums[i]} 0 R >>`),
     )
     body(
       contentNums[i],
-      concat(enc(`<< /Length ${compressedContents[i].length} /Filter /FlateDecode >>\nstream\n`), compressedContents[i], enc('\nendstream')),
+      concat(enc(`<< /Length ${compressed[i].length} /Filter /FlateDecode >>\nstream\n`), compressed[i], enc('\nendstream')),
     )
-    if (imageNums[i] != null) {
-      const img = pages[i].image!
-      body(
-        imageNums[i]!,
-        concat(
-          enc(`<< /Type /XObject /Subtype /Image /Width ${img.w} /Height ${img.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length ${compressedImages[i]!.length} >>\nstream\n`),
-          compressedImages[i]!,
-          enc('\nendstream'),
-        ),
-      )
-    }
   }
 
   const xrefOffset = len
@@ -428,12 +444,13 @@ export async function buildPdfFromLayers(
   layout: PdfLayout,
 ): Promise<Bytes> {
   const pages: PdfPageSpec[] = []
+  const center: [number, number] = [g.minX + g.w / 2, g.minY + g.h / 2]
 
   if (layout === 'perPage') {
-    const { pw, ph, p } = perPagePlacements(layers, g)
+    const { pw, ph, p } = perPagePlacements(g)
     for (const layer of layers) {
       const gfx = new Gfx(p.ox - g.minX * p.s, p.oy - g.minY * p.s, p.s)
-      emitLayer(gfx, layer.odb, layer.color)
+      emitLayer(gfx, layer.odb, layer.color, { rotate180: layer.rotate180, center, board: g })
       pages.push({ content: enc(gfx.ops.join('\n')), mediaBox: [pw, ph] })
     }
   } else {
@@ -460,113 +477,9 @@ export async function buildPdfFromLayers(
       const imgY = cellTopY - cellH / 2 - imgH / 2
       const imgX = margin + col * (cellW + gap) + (cellW - imgW) / 2
       const gfx = new Gfx(imgX - g.minX * s, imgY - g.minY * s, s, ops)
-      emitLayer(gfx, layers[i].odb, layers[i].color)
+      emitLayer(gfx, layers[i].odb, layers[i].color, { rotate180: layers[i].rotate180, center, board: g })
     }
     pages.push({ content: enc(ops.join('\n')), mediaBox: [pw, ph] })
-  }
-
-  return buildPdf(pages)
-}
-
-// ---------- 技术要求文字页（中文，canvas 渲染为位图嵌入） ----------
-
-export interface TechRequirement {
-  title: string
-  items: string[]
-}
-
-/** 技术要求文字位图：A4 竖版，白底深字，中文由浏览器 canvas 渲染，规避 CJK 字体嵌入 */
-function renderTechBitmap(
-  title: string,
-  items: string[],
-  scale = 3,
-): { ptW: number; ptH: number; pxW: number; pxH: number; rgb: Bytes } | null {
-  if (typeof document === 'undefined' || !document.createElement) return null
-  const ptW = 595.28
-  const ptH = 841.89
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.round(ptW * scale)
-  canvas.height = Math.round(ptH * scale)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-  ctx.scale(scale, scale)
-
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect(0, 0, ptW, ptH)
-  ctx.fillStyle = '#1f3a5f'
-  ctx.textBaseline = 'alphabetic'
-
-  ctx.font = 'bold 20pt "Microsoft YaHei", "PingFang SC", sans-serif'
-  ctx.fillText(title, 50, 58)
-  ctx.strokeStyle = '#1f3a5f'
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(50, 76)
-  ctx.lineTo(ptW - 50, 76)
-  ctx.stroke()
-
-  ctx.font = '11pt "Microsoft YaHei", "PingFang SC", sans-serif'
-  const maxW = ptW - 100
-  let y = 100
-  const lineH = 16
-  for (let idx = 0; idx < items.length; idx++) {
-    const text = `${idx + 1}. ${items[idx]}`
-    const lines = wrapText(ctx, text, maxW)
-    for (const line of lines) {
-      if (y > ptH - 60) return finish() // 超出页面，截断
-      ctx.fillText(line, 50, y)
-      y += lineH
-    }
-    y += 6
-  }
-
-  function finish(): { ptW: number; ptH: number; pxW: number; pxH: number; rgb: Bytes } {
-    const img = ctx!.getImageData(0, 0, canvas.width, canvas.height)
-    const rgb = new Uint8Array(canvas.width * canvas.height * 3)
-    for (let i = 0, j = 0; i < img.data.length; i += 4, j += 3) {
-      rgb[j] = img.data[i]
-      rgb[j + 1] = img.data[i + 1]
-      rgb[j + 2] = img.data[i + 2]
-    }
-    return { ptW, ptH, pxW: canvas.width, pxH: canvas.height, rgb }
-  }
-  return finish()
-}
-
-/** 按画布测量宽度对文本逐字换行 */
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
-  const lines: string[] = []
-  let cur = ''
-  for (const ch of text) {
-    if (cur && ctx.measureText(cur + ch).width > maxW) {
-      lines.push(cur)
-      cur = ch
-    } else {
-      cur += ch
-    }
-  }
-  if (cur) lines.push(cur)
-  return lines
-}
-
-/** 印制板图 / 组件图：首页技术要求 + 每层一页（矢量图元） */
-export async function buildPcbPdf(layers: PdfLayer[], g: GlobalBox, tech: TechRequirement): Promise<Bytes> {
-  const pages: PdfPageSpec[] = []
-
-  const bmp = renderTechBitmap(tech.title, tech.items)
-  if (bmp) {
-    pages.push({
-      mediaBox: [bmp.ptW, bmp.ptH],
-      content: enc(`q\n${fmt(bmp.ptW)} 0 0 ${fmt(bmp.ptH)} 0 0 cm\n/Im0 Do\nQ`),
-      image: { w: bmp.pxW, h: bmp.pxH, rgb: bmp.rgb },
-    })
-  }
-
-  const { pw, ph, p } = perPagePlacements(layers, g)
-  for (const layer of layers) {
-    const gfx = new Gfx(p.ox - g.minX * p.s, p.oy - g.minY * p.s, p.s)
-    emitLayer(gfx, layer.odb, layer.color)
-    pages.push({ content: enc(gfx.ops.join('\n')), mediaBox: [pw, ph] })
   }
 
   return buildPdf(pages)
@@ -578,15 +491,13 @@ function stamp(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
-/** 导出图层为原生矢量 PDF 并触发下载 */
+/** 导出图层为原生矢量 PDF 并触发下载（无技术要求标注） */
 export async function exportLayersPdf(
   layers: PdfLayer[],
-  opts: { g: GlobalBox; layout: PdfLayout; tech?: TechRequirement; prefix?: string },
+  opts: { g: GlobalBox; layout: PdfLayout; prefix?: string },
 ): Promise<void> {
   if (layers.length === 0) return
-  const pdf = opts.tech
-    ? await buildPcbPdf(layers, opts.g, opts.tech)
-    : await buildPdfFromLayers(layers, opts.g, opts.layout)
+  const pdf = await buildPdfFromLayers(layers, opts.g, opts.layout)
   const blob = new Blob([pdf], { type: 'application/pdf' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

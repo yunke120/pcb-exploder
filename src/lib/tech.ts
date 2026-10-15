@@ -38,7 +38,7 @@ function mm1(n: number): string {
  */
 export function pcbAutoSuggestions(g: { w: number; h: number }, copperLayerCount: number): string[] {
   return [
-    `基板材料 δ=1.6mm±10%，${copperLayerCount}层铜箔板`,
+    `基板材料 δ=1.6mm±10%，${copperLayerCount}层铜箔板（包含负片层）`,
     `外形尺寸 ${mm1(g.w)}mm × ${mm1(g.h)}mm`,
     '内层铜厚2OZ，表层铜厚2OZ',
     '印制板过孔树脂塞孔，过孔盖绿油',

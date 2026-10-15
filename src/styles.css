@@ -298,4 +298,15 @@ input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
   background: #fff; color: var(--ink);
 }
 .tech-add { flex: none; }
-.tech-section .export-btn { margin-top: 10px; }
+.tech-auto-input { flex: 1; font-size: 12px; padding: 4px 6px; }
+.tech-actions { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.tech-copy { width: 100%; }
+.notice {
+  font-size: 12px;
+  color: #1f7a3d;
+  background: #e8f4ec;
+  border: 1px solid #b7dfc4;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 12px;
+}

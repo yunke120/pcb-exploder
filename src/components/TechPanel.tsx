@@ -1,27 +1,32 @@
 import { useState } from 'react'
+import { PCB_TECH_PRESETS, ASSEMBLY_TECH_PRESETS } from '../lib/tech'
 
-/** 一条可勾选的技术要求条目 */
-export interface TechOption {
-  text: string
-  source: 'auto' | 'preset'
-}
-
+// 选择键约定：自动项 "a:<index>"、预置项 "p:<index>"；自定义条目始终包含（不可取消勾选）
 interface TechSectionProps {
   title: string
-  options: TechOption[]
+  /** 自动生成建议（可编辑文本，仅印制板图有） */
+  auto?: string[]
+  onEditAuto?: (index: number, text: string) => void
+  /** 预置通用要求（固定文本） */
+  presets: string[]
   selected: Set<string>
-  onToggle: (text: string) => void
+  onToggle: (id: string) => void
   custom: string[]
   onAddCustom: (text: string) => void
   onRemoveCustom: (index: number) => void
   disabled: boolean
   exportLabel: string
   onExport: () => void
+  /** 当前勾选（含自定义）条目数，用于复制按钮文案 */
+  copyCount: number
+  onCopy: () => void
 }
 
 function TechSection({
   title,
-  options,
+  auto = [],
+  onEditAuto,
+  presets,
   selected,
   onToggle,
   custom,
@@ -30,10 +35,10 @@ function TechSection({
   disabled,
   exportLabel,
   onExport,
+  copyCount,
+  onCopy,
 }: TechSectionProps) {
   const [draft, setDraft] = useState('')
-  const auto = options.filter((o) => o.source === 'auto')
-  const preset = options.filter((o) => o.source === 'preset')
 
   const submitCustom = () => {
     const t = draft.trim()
@@ -48,37 +53,48 @@ function TechSection({
 
       {auto.length > 0 && (
         <>
-          <div className="tech-sub">自动生成建议</div>
-          {auto.map((o) => (
-            <label key={o.text} className="tech-item">
-              <input
-                type="checkbox"
-                checked={selected.has(o.text)}
-                onChange={() => onToggle(o.text)}
-              />
-              <span>{o.text}</span>
-            </label>
-          ))}
+          <div className="tech-sub">自动生成建议（带数值项可编辑）</div>
+          {auto.map((o, i) => {
+            const id = `a:${i}`
+            return (
+              <div key={`a-${i}`} className="tech-item">
+                <input
+                  type="checkbox"
+                  checked={selected.has(id)}
+                  onChange={() => onToggle(id)}
+                />
+                <input
+                  type="text"
+                  className="tech-input tech-auto-input"
+                  value={o}
+                  onChange={(e) => onEditAuto?.(i, e.target.value)}
+                />
+              </div>
+            )
+          })}
         </>
       )}
 
       <div className="tech-sub">通用要求</div>
-      {preset.map((o) => (
-        <label key={o.text} className="tech-item">
-          <input
-            type="checkbox"
-            checked={selected.has(o.text)}
-            onChange={() => onToggle(o.text)}
-          />
-          <span>{o.text}</span>
-        </label>
-      ))}
+      {presets.map((o, i) => {
+        const id = `p:${i}`
+        return (
+          <label key={`p-${i}`} className="tech-item">
+            <input
+              type="checkbox"
+              checked={selected.has(id)}
+              onChange={() => onToggle(id)}
+            />
+            <span>{o}</span>
+          </label>
+        )
+      })}
 
       {custom.length > 0 && (
         <>
           <div className="tech-sub">自定义条目</div>
           {custom.map((t, i) => (
-            <div key={`${i}-${t}`} className="tech-item tech-custom">
+            <div key={`c-${i}-${t}`} className="tech-item tech-custom">
               <span className="tech-custom-text">{t}</span>
               <button className="tech-del" title="删除" onClick={() => onRemoveCustom(i)}>
                 ×
@@ -104,76 +120,103 @@ function TechSection({
         </button>
       </div>
 
-      <button className="btn primary export-btn" disabled={disabled} onClick={onExport}>
-        {exportLabel}
-      </button>
+      <div className="tech-actions">
+        <button
+          className="btn tech-copy"
+          disabled={copyCount === 0 || disabled}
+          onClick={onCopy}
+          title="仅复制当前勾选的技术要求条目"
+        >
+          复制技术要求{copyCount > 0 ? `（${copyCount}）` : ''}
+        </button>
+        <button className="btn primary export-btn" disabled={disabled} onClick={onExport}>
+          {exportLabel}
+        </button>
+      </div>
     </div>
   )
 }
 
 interface Props {
   disabled: boolean
-  layerCount: number
-  pcbOptions: TechOption[]
+  // 印制板图
+  pcbAuto: string[]
+  onPcbEditAuto: (index: number, text: string) => void
   pcbSelected: Set<string>
-  onPcbToggle: (text: string) => void
+  onPcbToggle: (id: string) => void
   pcbCustom: string[]
   onPcbAddCustom: (text: string) => void
   onPcbRemoveCustom: (index: number) => void
+  pcbExportLabel: string
   onExportPcb: () => void
-  assemblyOptions: TechOption[]
+  pcbCopyCount: number
+  onCopyPcb: () => void
+  // 组件图
   assemblySelected: Set<string>
-  onAssemblyToggle: (text: string) => void
+  onAssemblyToggle: (id: string) => void
   assemblyCustom: string[]
   onAssemblyAddCustom: (text: string) => void
   onAssemblyRemoveCustom: (index: number) => void
+  assemblyExportLabel: string
   onExportAssembly: () => void
+  assemblyCopyCount: number
+  onCopyAssembly: () => void
 }
 
 export default function TechPanel({
   disabled,
-  layerCount,
-  pcbOptions,
+  pcbAuto,
+  onPcbEditAuto,
   pcbSelected,
   onPcbToggle,
   pcbCustom,
   onPcbAddCustom,
   onPcbRemoveCustom,
+  pcbExportLabel,
   onExportPcb,
-  assemblyOptions,
+  pcbCopyCount,
+  onCopyPcb,
   assemblySelected,
   onAssemblyToggle,
   assemblyCustom,
   onAssemblyAddCustom,
   onAssemblyRemoveCustom,
+  assemblyExportLabel,
   onExportAssembly,
+  assemblyCopyCount,
+  onCopyAssembly,
 }: Props) {
-  const suffix = layerCount > 0 ? `（${layerCount} 层）` : ''
   return (
     <>
       <TechSection
-        title="印制板图技术要求"
-        options={pcbOptions}
+        title="印制板图"
+        auto={pcbAuto}
+        onEditAuto={onPcbEditAuto}
+        presets={PCB_TECH_PRESETS}
         selected={pcbSelected}
         onToggle={onPcbToggle}
         custom={pcbCustom}
         onAddCustom={onPcbAddCustom}
         onRemoveCustom={onPcbRemoveCustom}
         disabled={disabled}
-        exportLabel={`导出印制板图${suffix}`}
+        exportLabel={pcbExportLabel}
         onExport={onExportPcb}
+        copyCount={pcbCopyCount}
+        onCopy={onCopyPcb}
       />
       <TechSection
-        title="组件图技术要求"
-        options={assemblyOptions}
+        title="组件图"
+        presets={ASSEMBLY_TECH_PRESETS}
         selected={assemblySelected}
         onToggle={onAssemblyToggle}
         custom={assemblyCustom}
         onAddCustom={onAssemblyAddCustom}
         onRemoveCustom={onAssemblyRemoveCustom}
         disabled={disabled}
-        exportLabel={`导出组件图${suffix}`}
+        exportLabel={assemblyExportLabel}
         onExport={onExportAssembly}
+        copyCount={assemblyCopyCount}
+        onCopy={onCopyAssembly}
       />
     </>
   )

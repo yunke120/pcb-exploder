@@ -383,6 +383,10 @@ function odbMeta(type: string, name: string, row: number, polarity: string): Lay
       if (/top/.test(lower)) return make('topCopper', '顶层铜箔 (Top Copper)', 100)
       if (/bot/.test(lower)) return make('bottomCopper', '底层铜箔 (Bottom Copper)', 30)
       return make('innerCopper', `内层铜箔 ${name}`, 40 + (row % 20))
+    case 'POWER_GROUND':
+    case 'PLANE':
+      // 电源/地平面层（通常为负片）：作为内层铜箔参与印制板图导出
+      return make('innerCopper', `内层铜箔 ${name}`, 40 + (row % 20))
     case 'SOLDER_MASK':
       return make(isBot ? 'bottomSolderMask' : 'topSolderMask', isBot ? '底层阻焊 (Bottom Solder Mask)' : '顶层阻焊 (Top Solder Mask)', isBot ? 20 : 110)
     case 'SOLDER_PASTE':
