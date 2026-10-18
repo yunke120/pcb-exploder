@@ -26,3 +26,5 @@ Thumbs.db
 .vscode/
 .idea/
 *.local
+.claude/
+.dsh-code-index/
