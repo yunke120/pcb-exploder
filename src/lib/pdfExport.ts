@@ -8,17 +8,24 @@
 import type { OdbLayer, OdbFeature, OdbSymbol } from './odb'
 import type { GlobalBox } from './geometry'
 import type { LayerKind } from './layers'
+import { DEFAULT_MARGINS, type PdfMargins } from './pdfConfig'
 
 export interface PdfLayer {
   color: string
   odb: OdbLayer
   /** 导出时旋转 180°（用于底层丝印：翻转后按可读方向呈现） */
   rotate180?: boolean
+  /**
+   * 该层强制使用黑色绘制（忽略 ODB++ 数据色与预设色）。
+   * 用于印制板图：工程图纸惯例为单色制图，不按图层着色。
+   */
+  black?: boolean
 }
 
 export type PdfLayout = 'grid' | 'perPage'
 
 const KAPPA = 0.5522847498307936 // 贝塞尔圆近似常数 (4/3)(√2−1)
+const MM_TO_PT = 72 / 25.4 // 1mm = 72/25.4 pt，用于 1:1 实际尺寸导出
 
 // ---------- 数字格式化 ----------
 // 坐标最多 2 位小数（pt），去掉尾零；2 位小数 ≈ 0.0035mm 精度，远超 PCB 最小特征。
@@ -298,6 +305,15 @@ interface EmitOpts {
   board?: GlobalBox
 }
 
+interface EmitOpts {
+  rotate180?: boolean
+  /** 180° 旋转中心（板坐标），rotate180 时必填 */
+  center?: [number, number]
+  board?: GlobalBox
+  /** 强制黑色绘制（印制板图用） */
+  black?: boolean
+}
+
 /**
  * 把一层图元发射到指定 gfx。
  * - 常规正片层：逐图元填充/描边；
@@ -305,7 +321,9 @@ interface EmitOpts {
  *   用 evenodd（外框 + 空隙轮廓）一次填充。
  */
 function emitLayer(g: Gfx, layer: OdbLayer, color: string, opts: EmitOpts = {}) {
-  const c = pdfColorFor(layer.meta.kind, color)
+  // 图纸配色优先级：强制黑色（印制板图） > ODB++ 数据色 > 调用方传入的预设色。
+  // （3D 爆炸图仍使用预设色，与数据颜色相互独立。）
+  const c = opts.black ? '#000000' : pdfColorFor(layer.meta.kind, layer.color ?? color)
   const [r, gg, b] = hexToRgb01(c)
 
   if (opts.rotate180 && opts.center) {
@@ -341,16 +359,20 @@ interface Placed {
   s: number
 }
 
-function perPagePlacements(g: GlobalBox): { pw: number; ph: number; p: Placed } {
-  const long = 800
-  const margin = 20
-  const aspect = g.w / g.h || 1
-  const pw = aspect >= 1 ? long : Math.max(1, Math.round(long * aspect))
-  const ph = aspect >= 1 ? Math.max(1, Math.round(long / aspect)) : long
-  const s = Math.min((pw - 2 * margin) / g.w, (ph - 2 * margin) / g.h)
-  const ox = (pw - g.w * s) / 2
-  const oy = (ph - g.h * s) / 2
-  return { pw, ph, p: { ox, oy, s } }
+function perPagePlacements(g: GlobalBox, m: PdfMargins): { pw: number; ph: number; p: Placed } {
+  // 1:1 实际尺寸：1mm = 72/25.4 pt。图纸内容尺寸 = 板框实际尺寸（mm 换算为 pt），
+  // 保证按 100%（实际大小）打印时，板框即为真实大小（如 594mm × 420mm）。
+  // 在板框四周额外增加 top/bottom/left/right 留白（来自 pdf-config.json，默认 0.2mm），
+  // 因此页面尺寸 = 板框 + 对应两侧留白。
+  const s = MM_TO_PT
+  const ml = m.left * s
+  const mr = m.right * s
+  const mt = m.top * s
+  const mb = m.bottom * s
+  const pw = g.w * s + ml + mr
+  const ph = g.h * s + mt + mb
+  // 板框原点 (minX, minY) 平移到左侧留白、底部留白之后
+  return { pw, ph, p: { ox: ml, oy: mb, s } }
 }
 
 // ---------- Flate 压缩 ----------
@@ -442,15 +464,21 @@ export async function buildPdfFromLayers(
   layers: PdfLayer[],
   g: GlobalBox,
   layout: PdfLayout,
+  margins: PdfMargins = DEFAULT_MARGINS,
 ): Promise<Bytes> {
   const pages: PdfPageSpec[] = []
   const center: [number, number] = [g.minX + g.w / 2, g.minY + g.h / 2]
 
   if (layout === 'perPage') {
-    const { pw, ph, p } = perPagePlacements(g)
+    const { pw, ph, p } = perPagePlacements(g, margins)
     for (const layer of layers) {
       const gfx = new Gfx(p.ox - g.minX * p.s, p.oy - g.minY * p.s, p.s)
-      emitLayer(gfx, layer.odb, layer.color, { rotate180: layer.rotate180, center, board: g })
+      emitLayer(gfx, layer.odb, layer.color, {
+        rotate180: layer.rotate180,
+        center,
+        board: g,
+        black: layer.black,
+      })
       pages.push({ content: enc(gfx.ops.join('\n')), mediaBox: [pw, ph] })
     }
   } else {
@@ -477,7 +505,12 @@ export async function buildPdfFromLayers(
       const imgY = cellTopY - cellH / 2 - imgH / 2
       const imgX = margin + col * (cellW + gap) + (cellW - imgW) / 2
       const gfx = new Gfx(imgX - g.minX * s, imgY - g.minY * s, s, ops)
-      emitLayer(gfx, layers[i].odb, layers[i].color, { rotate180: layers[i].rotate180, center, board: g })
+      emitLayer(gfx, layers[i].odb, layers[i].color, {
+        rotate180: layers[i].rotate180,
+        center,
+        board: g,
+        black: layers[i].black,
+      })
     }
     pages.push({ content: enc(ops.join('\n')), mediaBox: [pw, ph] })
   }
@@ -494,10 +527,10 @@ function stamp(): string {
 /** 导出图层为原生矢量 PDF 并触发下载（无技术要求标注） */
 export async function exportLayersPdf(
   layers: PdfLayer[],
-  opts: { g: GlobalBox; layout: PdfLayout; prefix?: string },
+  opts: { g: GlobalBox; layout: PdfLayout; prefix?: string; margins?: PdfMargins },
 ): Promise<void> {
   if (layers.length === 0) return
-  const pdf = await buildPdfFromLayers(layers, opts.g, opts.layout)
+  const pdf = await buildPdfFromLayers(layers, opts.g, opts.layout, opts.margins ?? DEFAULT_MARGINS)
   const blob = new Blob([pdf], { type: 'application/pdf' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
