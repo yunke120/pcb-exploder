@@ -132,6 +132,8 @@ electron/
   main.cjs                主进程（窗口、IPC）
   preload.cjs             contextBridge 只读配置桥
   pdf-config.cjs          配置定位、解析与默认写入
+resources/                打包资源（应用图标 icon.png / icon.ico）
+public/                   前端静态资源（favicon、默认 pdf-config.json）
 scripts/                  验证脚本
 ```
 

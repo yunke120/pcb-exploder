@@ -21,7 +21,7 @@ ipcMain.handle('pdf-config:margins', () => {
 function resolveIcon() {
   // 打包后图标由 electron-builder 嵌入 exe；开发/未嵌入时回退到构建资源目录
   const candidates = [
-    path.join(__dirname, '..', 'build', 'icon.png'),
+    path.join(__dirname, '..', 'resources', 'icon.png'),
     path.join(process.resourcesPath || '', 'icon.png'),
   ]
   for (const p of candidates) {

@@ -35,9 +35,9 @@
     "productName": "PCB-Exploder",
     "directories": {
       "output": "release",
-      "buildResources": "build"
+      "buildResources": "resources"
     },
-    "icon": "build/icon.png",
+    "icon": "resources/icon.png",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -49,7 +49,7 @@
         "to": "pdf-config.json"
       },
       {
-        "from": "build/icon.png",
+        "from": "resources/icon.png",
         "to": "icon.png"
       }
     ],
