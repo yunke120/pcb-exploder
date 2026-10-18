@@ -71,6 +71,8 @@ export interface OdbLayer {
   symbols: Record<number, OdbSymbol>
   features: OdbFeature[]
   vb: ViewBox
+  /** ODB++ 数据中 #Layer_Color 定义的颜色（#RRGGBB）；未定义时为 undefined */
+  color?: string
   /** 铜层重建出的网络（含真实网名）；非铜层为空 */
   nets?: Net[]
 }
@@ -129,6 +131,26 @@ interface ParsedFeatures {
   symbols: Record<number, OdbSymbol>
   features: OdbFeature[]
   vb: ViewBox
+  /** 由 #Layer_Color 解析出的图层颜色（#RRGGBB）；数据未定义时为 undefined */
+  color?: string
+}
+
+/**
+ * 解析 ODB++ 的 `#Layer_Color=<十进制>` 属性为 #RRGGBB。
+ *
+ * ODB++ 以十进制整数存放颜色，字节序为 0xBBGGRR（非通常的 RRGGBB）。
+ * 佐证：本类数据中 TOP 层为 255（0x0000FF）→ 蓝色分量 0、红色分量 255 = 红；
+ * BOTTOM 层为 16711680（0xFF0000）→ 红分量 0、蓝分量 255 = 蓝，
+ * 与 PCB 行业“顶层红、底层蓝”的惯例一致，故按 BBGGRR 解读。
+ */
+function parseLayerColor(raw: string): string | undefined {
+  const n = parseInt(raw.trim(), 10)
+  if (!Number.isFinite(n) || n < 0 || n > 0xffffff) return undefined
+  const r = n & 0xff
+  const g = (n >> 8) & 0xff
+  const b = (n >> 16) & 0xff
+  const hex = (v: number) => v.toString(16).padStart(2, '0')
+  return `#${hex(r)}${hex(g)}${hex(b)}`
 }
 
 function parseFeatures(text: string): ParsedFeatures {
@@ -138,6 +160,7 @@ function parseFeatures(text: string): ParsedFeatures {
   let minY = Infinity
   let maxX = -Infinity
   let maxY = -Infinity
+  let color: string | undefined
 
   const touch = (x: number, y: number, r = 0) => {
     minX = Math.min(minX, x - r)
@@ -166,8 +189,12 @@ function parseFeatures(text: string): ParsedFeatures {
       i++
       continue
     }
-    // 其它定义（@ & #）跳过
+    // 其它定义（@ & #）跳过；# 行中若含 Layer_Color 则记录该层颜色
     if (line[0] === '@' || line[0] === '&' || line[0] === '#') {
+      if (line[0] === '#' && color === undefined) {
+        const mc = line.match(/Layer_Color\s*=\s*(\d+)/i)
+        if (mc) color = parseLayerColor(mc[1])
+      }
       i++
       continue
     }
@@ -277,8 +304,8 @@ function parseFeatures(text: string): ParsedFeatures {
     i++
   }
 
-  if (!isFinite(minX)) return { symbols, features, vb: { minX: 0, minY: 0, w: 1, h: 1 } }
-  return { symbols, features, vb: { minX, minY, w: maxX - minX, h: maxY - minY } }
+  if (!isFinite(minX)) return { symbols, features, vb: { minX: 0, minY: 0, w: 1, h: 1 }, color }
+  return { symbols, features, vb: { minX, minY, w: maxX - minX, h: maxY - minY }, color }
 }
 
 // ---------- matrix 解析 ----------
@@ -728,6 +755,8 @@ export async function parseOdb(entries: FileEntry[]): Promise<OdbDesign> {
     if (!fe) continue
     const parsed = parseFeatures(decodeText(await fe.bytes()))
     const meta = odbMeta(ml.type, ml.name, ml.row, ml.polarity)
+    // 注意：meta.color 保持内置预设色（供 3D 爆炸图与图层色块使用）；
+    // ODB++ 数据中定义的颜色单独存放在 layer.color，仅在导出图纸 PDF 时使用。
     const layer: OdbLayer = {
       name: ml.name,
       type: ml.type,
@@ -737,6 +766,7 @@ export async function parseOdb(entries: FileEntry[]): Promise<OdbDesign> {
       symbols: parsed.symbols,
       features: parsed.features,
       vb: parsed.vb,
+      color: parsed.color,
     }
     // 铜层重建网络（种子点直接绑定网名）
     if (meta.kind === 'topCopper' || meta.kind === 'bottomCopper' || meta.kind === 'innerCopper') {
