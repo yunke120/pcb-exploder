@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { PCB_TECH_PRESETS, ASSEMBLY_TECH_PRESETS } from '../lib/tech'
+import Collapsible, { usePersistentOpen } from './Collapsible'
 
 // 选择键约定：自动项 "a:<index>"、预置项 "p:<index>"；自定义条目始终包含（不可取消勾选）
 interface TechSectionProps {
@@ -47,10 +48,20 @@ function TechSection({
     setDraft('')
   }
 
-  return (
-    <div className="section tech-section">
-      <h2>{title}</h2>
+  const total = auto.length + presets.length + custom.length
+  const checkedCount =
+    auto.filter((_, i) => selected.has(`a:${i}`)).length +
+    presets.filter((_, i) => selected.has(`p:${i}`)).length +
+    custom.length
+  const { open, setOpen } = usePersistentOpen(`tech-${title}`, false)
 
+  return (
+    <Collapsible
+      title={title}
+      badge={`${checkedCount}/${total}`}
+      open={open}
+      onOpenChange={setOpen}
+    >
       {auto.length > 0 && (
         <>
           <div className="tech-sub">自动生成建议（带数值项可编辑）</div>
@@ -65,7 +76,8 @@ function TechSection({
                 />
                 <input
                   type="text"
-                  className="tech-input tech-auto-input"
+                  className="input tech-auto-input"
+                  aria-label="技术要求条目"
                   value={o}
                   onChange={(e) => onEditAuto?.(i, e.target.value)}
                 />
@@ -76,19 +88,21 @@ function TechSection({
       )}
 
       <div className="tech-sub">通用要求</div>
-      {presets.map((o, i) => {
-        const id = `p:${i}`
-        return (
-          <label key={`p-${i}`} className="tech-item">
-            <input
-              type="checkbox"
-              checked={selected.has(id)}
-              onChange={() => onToggle(id)}
-            />
-            <span>{o}</span>
-          </label>
-        )
-      })}
+      <div className="list list--tech">
+        {presets.map((o, i) => {
+          const id = `p:${i}`
+          return (
+            <label key={`p-${i}`} className="tech-item">
+              <input
+                type="checkbox"
+                checked={selected.has(id)}
+                onChange={() => onToggle(id)}
+              />
+              <span>{o}</span>
+            </label>
+          )
+        })}
+      </div>
 
       {custom.length > 0 && (
         <>
@@ -96,7 +110,13 @@ function TechSection({
           {custom.map((t, i) => (
             <div key={`c-${i}-${t}`} className="tech-item tech-custom">
               <span className="tech-custom-text">{t}</span>
-              <button className="tech-del" title="删除" onClick={() => onRemoveCustom(i)}>
+              <button
+                type="button"
+                className="tech-del"
+                title="删除"
+                aria-label={`删除条目：${t}`}
+                onClick={() => onRemoveCustom(i)}
+              >
                 ×
               </button>
             </div>
@@ -107,33 +127,35 @@ function TechSection({
       <div className="row tech-add-row">
         <input
           type="text"
-          className="tech-input"
+          className="input"
           placeholder="新增技术要求条目…"
+          aria-label="新增技术要求条目"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') submitCustom()
           }}
         />
-        <button className="btn tech-add" onClick={submitCustom}>
+        <button type="button" className="btn" onClick={submitCustom}>
           添加
         </button>
       </div>
 
       <div className="tech-actions">
         <button
-          className="btn tech-copy"
+          type="button"
+          className="btn"
           disabled={copyCount === 0 || disabled}
           onClick={onCopy}
           title="仅复制当前勾选的技术要求条目"
         >
           复制技术要求{copyCount > 0 ? `（${copyCount}）` : ''}
         </button>
-        <button className="btn primary export-btn" disabled={disabled} onClick={onExport}>
+        <button type="button" className="btn btn--primary" disabled={disabled} onClick={onExport}>
           {exportLabel}
         </button>
       </div>
-    </div>
+    </Collapsible>
   )
 }
 

@@ -7,8 +7,9 @@ import ExplosionView from './components/ExplosionView'
 import ExportPanel from './components/ExportPanel'
 import TechPanel from './components/TechPanel'
 import { exportLayersPdf, type PdfLayout, type PdfLayer } from './lib/pdfExport'
+import { loadPdfMargins } from './lib/pdfConfig'
 import { PCB_TECH_PRESETS, ASSEMBLY_TECH_PRESETS, pcbAutoSuggestions } from './lib/tech'
-import { type LayerMeta } from './lib/layers'
+import { type LayerMeta, compareStackOrder } from './lib/layers'
 import { computeGlobalBox, type ViewBox, type GlobalBox } from './lib/geometry'
 import { type Net } from './lib/nets'
 import { parseOdb, renderOdbToTexture, type OdbLayer, type FileEntry } from './lib/odb'
@@ -280,13 +281,15 @@ export default function App() {
     }))
   }, [spacingResults, spacingPair, netColors])
 
-  // 跨层合并：仅对“显式命名”的网络按名称归并；合成名（Net N）每层独立、不可合并。
+  // 跨层合并：仅对“显式命名”的网络按名称归并，每个网名只产生一条（面板也只显示一次）。
+  // 以 “Net” 开头的名称（解析器合成的占位名或网表自动编号）不参与网络高亮，直接排除。
   const mergedNets = useMemo<MergedNet[]>(() => {
     const byName = new Map<string, MergedNet>()
     for (const layer of items) {
       if (!layer.nets || layer.nets.length === 0) continue
       for (const net of layer.nets) {
         if (!net.explicit) continue
+        if (/^\s*net/i.test(net.name)) continue
         let m = byName.get(net.name)
         if (!m) {
           m = { name: net.name, members: [], totalCount: 0 }
@@ -395,10 +398,16 @@ export default function App() {
       const g = gbRef.current
       const layers = collectExportLayers()
       if (!g || layers.length === 0) return
-      exportLayersPdf(layers, { g, layout }).catch((e) => {
-        console.error('PDF 导出失败:', e)
-        setError('PDF 导出失败：' + (e as Error).message)
-      })
+      void (async () => {
+        try {
+          // 边距来自程序目录旁的 pdf-config.json（缺省 0.2mm）
+          const margins = await loadPdfMargins()
+          await exportLayersPdf(layers, { g, layout, margins })
+        } catch (e) {
+          console.error('PDF 导出失败:', e)
+          setError('PDF 导出失败：' + (e as Error).message)
+        }
+      })()
     },
     [collectExportLayers],
   )
@@ -505,23 +514,31 @@ export default function App() {
     return n
   }, [assemblySelected, assemblyCustom])
 
-  // ---- 导出：印制板图 = 全部铜箔层（含负片）；组件图 = 顶/底丝印（底层翻转 180°） ----
+  // ---- 导出：印制板图 = 全部铜箔层（含负片）；组件图 = 顶/底丝印（均按正向导出，不做翻转） ----
+  // 页序统一按 ODB++ matrix 的 ROW 升序 = 物理叠层从上至下，
+  // 例：印制板图第 1 页为顶层铜箔 TOP，组件图第 1 页为顶层丝印、其后才是底层丝印。
   const isCopperKind = (k: string) => k === 'topCopper' || k === 'bottomCopper' || k === 'innerCopper'
   const exportPcb = useCallback(() => {
     const g = gbRef.current
     if (!g) return
     const copper = itemsRef.current
       .filter((i) => i.odb && i.texture && isCopperKind(i.meta.kind))
-      .sort((a, b) => a.meta.order - b.meta.order)
-      .map((i) => ({ color: i.meta.color, odb: i.odb! }))
+      .sort((a, b) => compareStackOrder(a.odb!, b.odb!))
+      // 印制板图为单色工程图纸：所有铜箔层统一黑色绘制
+      .map((i) => ({ color: i.meta.color, odb: i.odb!, black: true }))
     if (copper.length === 0) {
       setError('未解析到铜箔层，无法导出印制板图')
       return
     }
-    exportLayersPdf(copper, { g, layout: 'perPage', prefix: '印制板图' }).catch((e) => {
-      console.error('印制板图导出失败:', e)
-      setError('印制板图导出失败：' + (e as Error).message)
-    })
+    void (async () => {
+      try {
+        const margins = await loadPdfMargins()
+        await exportLayersPdf(copper, { g, layout: 'perPage', prefix: '印制板图', margins })
+      } catch (e) {
+        console.error('印制板图导出失败:', e)
+        setError('印制板图导出失败：' + (e as Error).message)
+      }
+    })()
   }, [])
 
   const exportAssembly = useCallback(() => {
@@ -529,16 +546,21 @@ export default function App() {
     if (!g) return
     const silks = itemsRef.current
       .filter((i) => i.odb && i.texture && (i.meta.kind === 'topSilkscreen' || i.meta.kind === 'bottomSilkscreen'))
-      .sort((a, b) => a.meta.order - b.meta.order)
-      .map((i) => ({ color: i.meta.color, odb: i.odb!, rotate180: i.meta.kind === 'bottomSilkscreen' }))
+      .sort((a, b) => compareStackOrder(a.odb!, b.odb!))
+      .map((i) => ({ color: i.meta.color, odb: i.odb! }))
     if (silks.length === 0) {
       setError('未解析到丝印层，无法导出组件图')
       return
     }
-    exportLayersPdf(silks, { g, layout: 'perPage', prefix: '组件图' }).catch((e) => {
-      console.error('组件图导出失败:', e)
-      setError('组件图导出失败：' + (e as Error).message)
-    })
+    void (async () => {
+      try {
+        const margins = await loadPdfMargins()
+        await exportLayersPdf(silks, { g, layout: 'perPage', prefix: '组件图', margins })
+      } catch (e) {
+        console.error('组件图导出失败:', e)
+        setError('组件图导出失败：' + (e as Error).message)
+      }
+    })()
   }, [])
 
   const pcbExportLabel = useMemo(() => {
@@ -626,19 +648,49 @@ export default function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>PCB 爆炸图查看器</h1>
-        <span className="sub">ODB++ Layer Exploder · 爆炸展开 / 平面展开</span>
+        <div className="header__brand">
+          <h1>PCB 爆炸图查看器</h1>
+          <span className="sub">ODB++ Layer Exploder</span>
+        </div>
+        {hasRenderable && (
+          <div className="header__stats">
+            <span className="header__stat">
+              图层 <b>{visibleItems.length}</b>/{items.filter((i) => i.texture).length}
+            </span>
+            <span className="header__stat">
+              板框 <b>{aspect >= 1 ? '横向' : '纵向'}</b>
+            </span>
+          </div>
+        )}
       </header>
 
       <aside className="side">
         <DropZone onFiles={handleFiles} busy={busy} />
         {error && (
-          <div className="section" style={{ color: '#9b2c2c' }}>
-            {error}
+          <div className="banner banner--error" role="alert">
+            <span>{error}</span>
+            <button
+              type="button"
+              className="banner__close"
+              aria-label="关闭错误提示"
+              onClick={() => setError(null)}
+            >
+              ×
+            </button>
           </div>
         )}
         {notice && (
-          <div className="section notice">{notice}</div>
+          <div className="banner banner--success" role="status">
+            <span>{notice}</span>
+            <button
+              type="button"
+              className="banner__close"
+              aria-label="关闭提示"
+              onClick={() => setNotice(null)}
+            >
+              ×
+            </button>
+          </div>
         )}
         <ExportPanel
           disabled={visibleItems.length === 0}
@@ -680,7 +732,6 @@ export default function App() {
           setViewMode={setViewMode}
         />
         <NetPanel
-          items={items}
           mergedNets={mergedNets}
           selected={selectedNets}
           colors={netColors}
@@ -713,8 +764,10 @@ export default function App() {
           />
         ) : (
           <div className="empty-hint">
-            拖入 ODB++ 文件夹（或对应的 .zip）<br />
-            即可将各层以爆炸图形式展开
+            <div>拖入 ODB++ 文件夹（或对应的 .zip）</div>
+            <div>
+              即可将各层以爆炸图形式展开 · 快捷键 <kbd>Enter</kbd> 也可选择文件
+            </div>
           </div>
         )}
         {hasRenderable && (

@@ -55,7 +55,15 @@ export default function DropZone({ onFiles, busy }: Props) {
   return (
     <div
       className={`dropzone${over ? ' over' : ''}`}
+      role="button"
+      tabIndex={0}
       onClick={() => inputRef.current?.click()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          inputRef.current?.click()
+        }
+      }}
       onDragOver={(e) => {
         e.preventDefault()
         setOver(true)
@@ -64,7 +72,7 @@ export default function DropZone({ onFiles, busy }: Props) {
       onDrop={handleDrop}
     >
       <strong>{busy ? '正在解析图层…' : '拖入 ODB++ 文件夹 / .zip'}</strong>
-      <small>支持 ODB++ 目录树（steps/&lt;step&gt;/layers/...）或对应 .zip 压缩包</small>
+      <small>支持 ODB++ 目录树（steps/&lt;step&gt;/layers/…）或对应的 .zip 压缩包</small>
       <input
         ref={inputRef}
         type="file"

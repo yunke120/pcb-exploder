@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { PdfLayout } from '../lib/pdfExport'
+import Collapsible, { usePersistentOpen } from './Collapsible'
 
 interface Props {
   disabled: boolean
@@ -9,13 +10,17 @@ interface Props {
 
 export default function ExportPanel({ disabled, count, onExport }: Props) {
   const [layout, setLayout] = useState<PdfLayout>('grid')
+  const { open, setOpen } = usePersistentOpen('export')
 
   return (
-    <div className="section">
-      <h2>导出 PDF</h2>
-      <div className="row">
+    <Collapsible title="导出 PDF" open={open} onOpenChange={setOpen}>
+      <div className="field">
+        <label className="field__label" htmlFor="pdf-layout">
+          布局
+        </label>
         <select
-          className="export-select"
+          id="pdf-layout"
+          className="input"
           value={layout}
           disabled={disabled}
           onChange={(e) => setLayout(e.target.value as PdfLayout)}
@@ -24,12 +29,15 @@ export default function ExportPanel({ disabled, count, onExport }: Props) {
           <option value="perPage">每层一页</option>
         </select>
       </div>
-      <button className="btn primary export-btn" disabled={disabled} onClick={() => onExport(layout)}>
+      <button
+        type="button"
+        className="btn btn--primary btn--block"
+        disabled={disabled}
+        onClick={() => onExport(layout)}
+      >
         导出 PDF{count > 0 ? `（${count} 层）` : ''}
       </button>
-      <div className="meta">
-        从 ODB++ 直接生成矢量 PDF（放大不失真），仅导出当前勾选的图层，白底。
-      </div>
-    </div>
+      <div className="hint">从 ODB++ 直接生成矢量 PDF（放大不失真），仅导出当前勾选的图层，白底。</div>
+    </Collapsible>
   )
 }
