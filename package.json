@@ -39,6 +39,12 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "public/pdf-config.json",
+        "to": "pdf-config.json"
+      }
+    ],
     "asar": true,
     "win": {
       "target": "portable"
