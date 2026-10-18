@@ -18,6 +18,22 @@ ipcMain.handle('pdf-config:margins', () => {
   }
 })
 
+function resolveIcon() {
+  // 打包后图标由 electron-builder 嵌入 exe；开发/未嵌入时回退到构建资源目录
+  const candidates = [
+    path.join(__dirname, '..', 'build', 'icon.png'),
+    path.join(process.resourcesPath || '', 'icon.png'),
+  ]
+  for (const p of candidates) {
+    try {
+      if (p && require('fs').existsSync(p)) return p
+    } catch {
+      /* 忽略 */
+    }
+  }
+  return undefined
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -27,6 +43,7 @@ function createWindow() {
     backgroundColor: '#0d1a26',
     autoHideMenuBar: true,
     title: 'PCB 爆炸图查看器',
+    icon: resolveIcon(),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

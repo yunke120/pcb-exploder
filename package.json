@@ -2,6 +2,8 @@
   "name": "pcb-exploder",
   "private": true,
   "version": "0.1.0",
+  "description": "PCB 爆炸图查看器：解析 ODB++ 数据，将各层以爆炸图/平面展开形式呈现，支持网络高亮、最小间距计算，并导出 1:1 实际尺寸的矢量 PDF 图纸。",
+  "author": "yunke120 <yunke1206@gmail.com>",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -32,8 +34,10 @@
     "appId": "com.yunke.pcb-exploder",
     "productName": "PCB-Exploder",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
+    "icon": "build/icon.png",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -43,6 +47,10 @@
       {
         "from": "public/pdf-config.json",
         "to": "pdf-config.json"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
     "asar": true,
