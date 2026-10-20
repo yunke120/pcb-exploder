@@ -9,12 +9,17 @@ const fs = require('fs')
 const path = require('path')
 const { app } = require('electron')
 
-/** 四个方向的默认边距（mm） */
-const DEFAULT_MARGIN_MM = 0.2
+/** 四个方向的默认留白（PDF 用户空间坐标 pt，1pt = 1/72 英寸） */
+const DEFAULT_MARGIN_PT = 8
 const KEYS = ['top', 'bottom', 'left', 'right']
 
 function defaults() {
-  return { top: DEFAULT_MARGIN_MM, bottom: DEFAULT_MARGIN_MM, left: DEFAULT_MARGIN_MM, right: DEFAULT_MARGIN_MM }
+  return {
+    top: DEFAULT_MARGIN_PT,
+    bottom: DEFAULT_MARGIN_PT,
+    left: DEFAULT_MARGIN_PT,
+    right: DEFAULT_MARGIN_PT,
+  }
 }
 
 /** 候选配置目录，按优先级从高到低 */
@@ -76,11 +81,12 @@ function ensureDefaultConfig() {
     if (fs.existsSync(file)) return file
     try {
       const body = {
-        _说明: '图纸 PDF 页边距（单位 mm）。在板框四周额外增加的留白，四个方向均可独立设置，默认 0.2。',
-        top: DEFAULT_MARGIN_MM,
-        bottom: DEFAULT_MARGIN_MM,
-        left: DEFAULT_MARGIN_MM,
-        right: DEFAULT_MARGIN_MM,
+        _说明: '图纸 PDF 四周留白，单位为 PDF 用户空间坐标 pt（1pt = 1/72 英寸 ≈ 0.3528mm）。',
+        _说明_2: '页面尺寸恒等于板框实际尺寸；图形按 (1-(left+right)/W)、(1-(top+bottom)/H) 内缩，四周留出对应宽度。',
+        top: DEFAULT_MARGIN_PT,
+        bottom: DEFAULT_MARGIN_PT,
+        left: DEFAULT_MARGIN_PT,
+        right: DEFAULT_MARGIN_PT,
       }
       fs.writeFileSync(file, JSON.stringify(body, null, 2) + '\n', 'utf8')
       return file
@@ -91,4 +97,4 @@ function ensureDefaultConfig() {
   return null
 }
 
-module.exports = { readMargins, ensureDefaultConfig, defaults, KEYS, DEFAULT_MARGIN_MM }
+module.exports = { readMargins, ensureDefaultConfig, defaults, KEYS, DEFAULT_MARGIN_PT }

@@ -3,9 +3,10 @@
 // 配置来源优先级：
 //   1. Electron 预加载脚本暴露的 window.pcbExploder.getPdfMargins()（读取程序目录旁 pdf-config.json）
 //   2. 开发/浏览器模式：直接 fetch 项目根目录下的 public/pdf-config.json
-//   3. 均不可用：使用内置默认值 0.2mm
+//   3. 均不可用：使用内置默认值
 //
-// 四个数值单位均为 mm，表示在板框四周额外增加的长度。
+// 四个数值的单位是 PDF 用户空间坐标（pt，1pt = 1/72 英寸 ≈ 0.3528mm），
+// 含义是「在固定画幅的页面上，于四周预留出的留白带宽度」——图形据此内缩缩放。
 
 export interface PdfMargins {
   top: number
@@ -14,14 +15,14 @@ export interface PdfMargins {
   right: number
 }
 
-/** 默认边距：四向各 0.2mm */
-export const DEFAULT_MARGIN_MM = 0.2
+/** 默认留白（pt）：四向各 8pt ≈ 2.82mm */
+export const DEFAULT_MARGIN_PT = 8
 
 export const DEFAULT_MARGINS: PdfMargins = {
-  top: DEFAULT_MARGIN_MM,
-  bottom: DEFAULT_MARGIN_MM,
-  left: DEFAULT_MARGIN_MM,
-  right: DEFAULT_MARGIN_MM,
+  top: DEFAULT_MARGIN_PT,
+  bottom: DEFAULT_MARGIN_PT,
+  left: DEFAULT_MARGIN_PT,
+  right: DEFAULT_MARGIN_PT,
 }
 
 /** 预加载脚本注入的桥接对象 */

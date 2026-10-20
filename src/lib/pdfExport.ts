@@ -84,26 +84,32 @@ function concat(...arrs: Uint8Array[]): Bytes {
 // ---------- 绘图上下文（板坐标 mm → PDF pt 的仿射变换 + 运算符缓冲） ----------
 class Gfx {
   ops: string[]
-  // PDF_x = ax + x*s，PDF_y = ay + y*s
+  // PDF_x = ax + x*sx，PDF_y = ay + y*sy
+  // 横向与纵向缩放分开存储，以支持“固定画幅 + 内缩”布局下的非等比缩放。
   constructor(
     private ax: number,
     private ay: number,
-    private s: number,
+    private sx: number,
+    private sy = sx,
     ops?: string[],
   ) {
     this.ops = ops ?? []
   }
   /** 板坐标点 → "x y" */
   P(x: number, y: number): string {
-    return `${fmt(this.ax + x * this.s)} ${fmt(this.ay + y * this.s)}`
+    return `${fmt(this.ax + x * this.sx)} ${fmt(this.ay + y * this.sy)}`
   }
   /** 板坐标点 → PDF 坐标数值 [px, py] */
   pt(x: number, y: number): [number, number] {
-    return [this.ax + x * this.s, this.ay + y * this.s]
+    return [this.ax + x * this.sx, this.ay + y * this.sy]
   }
-  /** 板坐标长度(mm) → pt 数值 */
+  /** 板坐标长度(mm) → pt 数值（横向口径，用于线宽等标量） */
   W(mm: number): string {
-    return fmt(mm * this.s)
+    return fmt(mm * this.sx)
+  }
+  /** 板坐标长度(mm) → pt 数值（纵向口径） */
+  Hy(mm: number): string {
+    return fmt(mm * this.sy)
   }
 }
 
@@ -354,25 +360,60 @@ function emitLayer(g: Gfx, layer: OdbLayer, color: string, opts: EmitOpts = {}) 
 
 // ---------- 布局 ----------
 interface Placed {
+  /** 板框原点映射到页面上的 x（pt） */
   ox: number
+  /** 板框原点映射到页面上的 y（pt） */
   oy: number
-  s: number
+  /** 横向缩放（pt/mm），= MM_TO_PT * sx */
+  sx: number
+  /** 纵向缩放（pt/mm），= MM_TO_PT * sy */
+  sy: number
 }
 
+/**
+ * 单页布局：固定画幅（页面 = 板框实际尺寸）+ 内缩缩放。
+ *
+ * 页面尺寸恒等于板框实际尺寸（A2 即 594mm × 420mm，换算为 pt 后为 MediaBox），
+ * 不因边距而增大。图形按横向 sx、纵向 sy 缩进页面内侧，四周腾出留白带：
+ *
+ *   W = g.w * MM_TO_PT（板宽，pt）；H = g.h * MM_TO_PT（板高，pt）
+ *   sx = 1 - (left + right) / W
+ *   sy = 1 - (top + bottom) / H
+ *
+ * 边距 m.top/bottom/left/right 的单位是 PDF 用户空间坐标（pt，1pt = 1/72 英寸），
+ * 因此四条留白带的实际宽度精确等于配置值。
+ *
+ * 注意：sx 与 sy 由各自的边距和被除数决定，通常不完全相等（A2 上约差 0.03%），
+ * 属于刻意保留的非等比缩放——它保证四边留白严格等于用户设定值。
+ */
 function perPagePlacements(g: GlobalBox, m: PdfMargins): { pw: number; ph: number; p: Placed } {
-  // 1:1 实际尺寸：1mm = 72/25.4 pt。图纸内容尺寸 = 板框实际尺寸（mm 换算为 pt），
-  // 保证按 100%（实际大小）打印时，板框即为真实大小（如 594mm × 420mm）。
-  // 在板框四周额外增加 top/bottom/left/right 留白（来自 pdf-config.json，默认 0.2mm），
-  // 因此页面尺寸 = 板框 + 对应两侧留白。
-  const s = MM_TO_PT
-  const ml = m.left * s
-  const mr = m.right * s
-  const mt = m.top * s
-  const mb = m.bottom * s
-  const pw = g.w * s + ml + mr
-  const ph = g.h * s + mt + mb
-  // 板框原点 (minX, minY) 平移到左侧留白、底部留白之后
-  return { pw, ph, p: { ox: ml, oy: mb, s } }
+  const W = g.w * MM_TO_PT // 板宽 pt
+  const H = g.h * MM_TO_PT // 板高 pt
+
+  const ml = m.left
+  const mr = m.right
+  const mt = m.top
+  const mb = m.bottom
+
+  // 留白不得吃到内容：合计超过板宽/高时按比例收窄，避免出现反向缩放
+  const clampPair = (a: number, b: number, total: number) => {
+    const sum = a + b
+    if (sum <= 0 || sum < total) return [a, b] as const
+    const k = (total * 0.5) / sum
+    return [a * k, b * k] as const
+  }
+  const [l, r] = clampPair(ml, mr, W)
+  const [t, b] = clampPair(mt, mb, H)
+
+  const sx = Math.max(1e-6, 1 - (l + r) / W)
+  const sy = Math.max(1e-6, 1 - (t + b) / H)
+
+  // 页面尺寸 = 板框实际尺寸（pt），恒定不变
+  const pw = W
+  const ph = H
+
+  // 板框原点平移到「左侧留白 + 底部留白」之后
+  return { pw, ph, p: { ox: l, oy: b, sx: MM_TO_PT * sx, sy: MM_TO_PT * sy } }
 }
 
 // ---------- Flate 压缩 ----------
@@ -472,7 +513,7 @@ export async function buildPdfFromLayers(
   if (layout === 'perPage') {
     const { pw, ph, p } = perPagePlacements(g, margins)
     for (const layer of layers) {
-      const gfx = new Gfx(p.ox - g.minX * p.s, p.oy - g.minY * p.s, p.s)
+      const gfx = new Gfx(p.ox - g.minX * p.sx, p.oy - g.minY * p.sy, p.sx, p.sy)
       emitLayer(gfx, layer.odb, layer.color, {
         rotate180: layer.rotate180,
         center,
@@ -504,7 +545,7 @@ export async function buildPdfFromLayers(
       const cellTopY = ph - margin - row * (cellH + gap)
       const imgY = cellTopY - cellH / 2 - imgH / 2
       const imgX = margin + col * (cellW + gap) + (cellW - imgW) / 2
-      const gfx = new Gfx(imgX - g.minX * s, imgY - g.minY * s, s, ops)
+      const gfx = new Gfx(imgX - g.minX * s, imgY - g.minY * s, s, s, ops)
       emitLayer(gfx, layers[i].odb, layers[i].color, {
         rotate180: layers[i].rotate180,
         center,
