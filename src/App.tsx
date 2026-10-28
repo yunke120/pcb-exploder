@@ -198,6 +198,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const itemsRef = useRef<LayerItem[]>([])
   const gbRef = useRef<GlobalBox | null>(null)
+  /** 真实板框轮廓（用于翻转时只镜像板面内容、保留 A2 图框正向） */
+  const profileRef = useRef<ViewBox | null>(null)
   // 网络高亮：选中的网络 key 集合（layerId::netId）与对应叠加纹理
   const [selectedNets, setSelectedNets] = useState<Set<string>>(new Set())
   const [netOverlays, setNetOverlays] = useState<Record<string, import('three').Texture>>({})
@@ -320,6 +322,7 @@ export default function App() {
     if (design.profile) vbs.push(design.profile)
     const g = computeGlobalBox(vbs)
     const asp = g.w / g.h || 1
+    profileRef.current = design.profile ?? null
 
     // 释放旧纹理
     for (const old of itemsRef.current) old.texture?.dispose()
@@ -544,10 +547,20 @@ export default function App() {
   const exportAssembly = useCallback(() => {
     const g = gbRef.current
     if (!g) return
+    // 底层丝印镜像（等同 PCB 软件的 V+B 看底面）：
+    // 只镜像板框区域内的板面图形，A2 图框与标题栏保持正向可读。
+    const region = profileRef.current ?? undefined
     const silks = itemsRef.current
       .filter((i) => i.odb && i.texture && (i.meta.kind === 'topSilkscreen' || i.meta.kind === 'bottomSilkscreen'))
       .sort((a, b) => compareStackOrder(a.odb!, b.odb!))
-      .map((i) => ({ color: i.meta.color, odb: i.odb! }))
+      .map((i) => {
+        const isBottom = i.meta.kind === 'bottomSilkscreen'
+        return {
+          color: i.meta.color,
+          odb: i.odb!,
+          ...(isBottom && region ? { mirrorX: true, mirrorRegion: region } : {}),
+        }
+      })
     if (silks.length === 0) {
       setError('未解析到丝印层，无法导出组件图')
       return

@@ -16,6 +16,17 @@ export interface PdfLayer {
   /** 导出时旋转 180°（用于底层丝印：翻转后按可读方向呈现） */
   rotate180?: boolean
   /**
+   * 水平镜像「板面内容」（等同 PCB 软件里的 V+B 看底面）。
+   *
+   * 与 rotate180 的区别：镜像只作用于 *region* 指定的板框矩形内部，
+   * 图纸上的 A2 图框、标题栏、图号等仍保持正向可读——
+   * 这与从底层看的真实效果一致（图框属于图纸，不属于板面）。
+   * region 缺省时退化为对整页镜像。
+   */
+  mirrorX?: boolean
+  /** mirrorX 的作用区域（板坐标 mm），通常传 design.profile */
+  mirrorRegion?: { minX: number; minY: number; w: number; h: number }
+  /**
    * 该层强制使用黑色绘制（忽略 ODB++ 数据色与预设色）。
    * 用于印制板图：工程图纸惯例为单色制图，不按图层着色。
    */
@@ -348,21 +359,18 @@ function emitFeature(g: Gfx, f: OdbFeature, syms: Record<number, OdbSymbol>) {
 
 /** 图层发射选项 */
 interface EmitOpts {
-  /** 是否旋转 180°（绕 rotateCenter） */
+  /** 是否旋转 180°（绕 center 指定的中心） */
   rotate180?: boolean
   /** 180° 旋转中心（板坐标），rotate180 时必填 */
   center?: [number, number]
   /** 全局板框（负片层渲染用） */
   board?: GlobalBox
-}
-
-interface EmitOpts {
-  rotate180?: boolean
-  /** 180° 旋转中心（板坐标），rotate180 时必填 */
-  center?: [number, number]
-  board?: GlobalBox
   /** 强制黑色绘制（印制板图用） */
   black?: boolean
+  /** 水平镜像板面内容（V+B 看底面），仅作用于 mirrorRegion 内部 */
+  mirrorX?: boolean
+  /** mirrorX 的作用区域（板坐标 mm），通常传 design.profile */
+  mirrorRegion?: { minX: number; minY: number; w: number; h: number }
 }
 
 /**
@@ -371,11 +379,93 @@ interface EmitOpts {
  * - 负片层（layer.polarity === 'NEGATIVE'）：铜箔 = 板框 减去 图元（空隙），
  *   用 evenodd（外框 + 空隙轮廓）一次填充。
  */
+/**
+ * 判断一个图元是否落在板框区域（region）内。
+ *
+ * 用图元的代表点与包围盒做粗判：
+ * - pad：中心点
+ * - line / arc：起终点连线中点 + 圆心
+ * - surface：任一顶点落在区域内
+ * 图框与标题栏的图元整体位于板框之外，因此会被判为「区域外」。
+ */
+function featureTouchesRegion(
+  f: OdbFeature,
+  r: { minX: number; minY: number; w: number; h: number },
+): boolean {
+  const x1 = r.minX
+  const y1 = r.minY
+  const x2 = r.minX + r.w
+  const y2 = r.minY + r.h
+  const inRect = (x: number, y: number) => x >= x1 && x <= x2 && y >= y1 && y <= y2
+
+  if (f.kind === 'pad' && f.x != null && f.y != null) return inRect(f.x, f.y)
+
+  if ((f.kind === 'line' || f.kind === 'arc') && f.x1 != null && f.y1 != null) {
+    // 端点、中点或圆心任一在区域内即算区域内容
+    const ax = f.x1
+    const ay = f.y1
+    const bx = f.x2 ?? ax
+    const by = f.y2 ?? ay
+    const mx = (ax + bx) / 2
+    const my = (ay + by) / 2
+    if (inRect(ax, ay)) return true
+    if (f.x2 != null && f.y2 != null && inRect(f.x2, f.y2)) return true
+    if (inRect(mx, my)) return true
+    if (f.kind === 'arc' && f.cx != null && f.cy != null && inRect(f.cx, f.cy)) return true
+    return false
+  }
+
+  if (f.kind === 'surface' && f.poly && f.poly.length >= 3) {
+    for (const p of f.poly) if (inRect(p[0], p[1])) return true
+    return false
+  }
+
+  return false
+}
+
 function emitLayer(g: Gfx, layer: OdbLayer, color: string, opts: EmitOpts = {}) {
   // 图纸配色优先级：强制黑色（印制板图） > ODB++ 数据色 > 调用方传入的预设色。
   // （3D 爆炸图仍使用预设色，与数据颜色相互独立。）
   const c = opts.black ? '#000000' : pdfColorFor(layer.meta.kind, layer.color ?? color)
   const [r, gg, b] = hexToRgb01(c)
+
+  // 水平镜像「板面内容」（等同 PCB 软件的 V+B 看底面）。
+  //
+  // 关键点：底层丝印层的图框/标题栏与板面图形混在同一个 layer 里。
+  // 若整层镜像，图框文字会变镜像字；若整层裁剪，图框会被裁掉。
+  // 因此按图元归属分两遍绘制：
+  //   ① 落在板框区域之外的图元（图框、标题栏）→ 正向绘制
+  //   ② 落在板框区域之内的图元（板面丝印）    → 镜像绘制
+  const mirroring = !!opts.mirrorX && !!opts.mirrorRegion
+  const region = opts.mirrorRegion
+
+  if (mirroring && region) {
+    const inside: OdbFeature[] = []
+    const outside: OdbFeature[] = []
+    for (const f of layer.features) {
+      if (featureTouchesRegion(f, region)) inside.push(f)
+      else outside.push(f)
+    }
+
+    g.ops.push(`${fmt(r)} ${fmt(gg)} ${fmt(b)} rg`, `${fmt(r)} ${fmt(gg)} ${fmt(b)} RG`)
+
+    // ① 图框 / 标题栏：正向
+    for (const f of outside) emitFeature(g, f, layer.symbols)
+
+    // ② 板面图形：裁剪到板框内 + 绕板框竖直中线镜像
+    g.ops.push('q')
+    emitRectPath(g, region.minX, region.minY, region.w, region.h)
+    g.ops.push('W', 'n')
+    const [cxPdf] = g.pt(region.minX + region.w / 2, region.minY)
+    g.ops.push(`-1 0 0 1 ${fmt(2 * cxPdf)} 0 cm`)
+    for (const f of inside) emitFeature(g, f, layer.symbols)
+    g.ops.push('Q')
+
+    if (opts.rotate180 && opts.center) {
+      // 镜像与 180° 旋转互斥使用，这里不会同时触发
+    }
+    return
+  }
 
   if (opts.rotate180 && opts.center) {
     const [px, py] = g.pt(opts.center[0], opts.center[1])
@@ -564,6 +654,8 @@ export async function buildPdfFromLayers(
         center,
         board: g,
         black: layer.black,
+        mirrorX: layer.mirrorX,
+        mirrorRegion: layer.mirrorRegion,
       })
       pages.push({ content: enc(gfx.ops.join('\n')), mediaBox: [pw, ph] })
     }
@@ -596,6 +688,8 @@ export async function buildPdfFromLayers(
         center,
         board: g,
         black: layers[i].black,
+        mirrorX: layers[i].mirrorX,
+        mirrorRegion: layers[i].mirrorRegion,
       })
     }
     pages.push({ content: enc(ops.join('\n')), mediaBox: [pw, ph] })
