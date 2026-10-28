@@ -43,6 +43,14 @@ export interface OdbSymbol {
   r?: number // 圆角半径 mm（rect）
   d?: number // 直径 mm（round/donut）
   inner?: number // 内径 mm（donut）
+  /**
+   * 符号自身旋转角度（度，逆时针为正）。
+   *
+   * ODB++ 会用 `_<angle>` 后缀表示带旋转的符号，例如
+   * `oval39.3701x62.9921_216` = 39.37mil × 62.99mil 的椭圆旋转 216°。
+   * 未带后缀时为 0。
+   */
+  rot?: number
 }
 
 export type OdbFeatKind = 'pad' | 'line' | 'arc' | 'surface'
@@ -89,41 +97,89 @@ export interface FileEntry {
 }
 
 // ---------- 符号解析 ----------
+/**
+ * 解析 ODB++ 符号定义。
+ *
+ * ODB++ 允许在定义末尾追加 `_<angle>` 表示符号自身旋转，例如：
+ *   `oval39.3701x62.9921_216`  → 椭圆 39.37×62.99 mil，旋转 216°
+ * 这类后缀会让所有只认「基础形状」的正则失配，从而落入 unknown 兜底分支、
+ * 被误画成按首个数字取直径的圆点。因此这里统一先剥离后缀，再解析形状。
+ */
 function parseSymbol(def: string): OdbSymbol {
-  const s = def.trim()
+  let s = def.trim()
+
+  // 剥离尾部旋转后缀 `_<number>`（如 _216、_72.5）
+  let rot = 0
+  const rotMatch = s.match(/^(.*)_([\d.]+)$/)
+  if (rotMatch) {
+    const base = rotMatch[1]
+    const angle = parseFloat(rotMatch[2])
+    // 仅当基础部分本身是合法形状时才认定为旋转后缀，
+    // 避免把名字里本就带下划线的自定义符号误拆（如 "my_pad_2"）。
+    if (isFinite(angle) && /^[a-z]/i.test(base)) {
+      s = base
+      rot = ((angle % 360) + 360) % 360
+    }
+  }
+
+  const withRot = (sym: OdbSymbol): OdbSymbol => (rot ? { ...sym, rot } : sym)
+
   // rectWxHxrR / rectWxH
   let m = s.match(/^rect([\d.]+)x([\d.]+)(?:xr([\d.]+))?$/i)
   if (m) {
-    return { kind: 'rect', w: parseFloat(m[1]) * MIL_TO_MM, h: parseFloat(m[2]) * MIL_TO_MM, r: m[3] ? parseFloat(m[3]) * MIL_TO_MM : 0 }
+    return withRot({
+      kind: 'rect',
+      w: parseFloat(m[1]) * MIL_TO_MM,
+      h: parseFloat(m[2]) * MIL_TO_MM,
+      r: m[3] ? parseFloat(m[3]) * MIL_TO_MM : 0,
+    })
   }
   // squareWxH / squareW
   m = s.match(/^square([\d.]+)(?:x([\d.]+))?$/i)
   if (m) {
     const w = parseFloat(m[1]) * MIL_TO_MM
-    return { kind: 'square', w, h: m[2] ? parseFloat(m[2]) * MIL_TO_MM : w }
+    return withRot({ kind: 'square', w, h: m[2] ? parseFloat(m[2]) * MIL_TO_MM : w })
   }
   // ovalWxH
   m = s.match(/^oval([\d.]+)x([\d.]+)$/i)
-  if (m) return { kind: 'oval', w: parseFloat(m[1]) * MIL_TO_MM, h: parseFloat(m[2]) * MIL_TO_MM }
+  if (m) {
+    return withRot({
+      kind: 'oval',
+      w: parseFloat(m[1]) * MIL_TO_MM,
+      h: parseFloat(m[2]) * MIL_TO_MM,
+    })
+  }
   // octWxHxS
   m = s.match(/^oct([\d.]+)x([\d.]+)(?:x([\d.]+))?$/i)
-  if (m) return { kind: 'oct', w: parseFloat(m[1]) * MIL_TO_MM, h: parseFloat(m[2]) * MIL_TO_MM }
+  if (m) {
+    return withRot({
+      kind: 'oct',
+      w: parseFloat(m[1]) * MIL_TO_MM,
+      h: parseFloat(m[2]) * MIL_TO_MM,
+    })
+  }
   // donutDxDi / donutD
   m = s.match(/^donut([\d.]+)(?:x([\d.]+))?$/i)
   if (m) {
     const d = parseFloat(m[1]) * MIL_TO_MM
-    return { kind: 'donut', w: d, h: d, d, inner: m[2] ? parseFloat(m[2]) * MIL_TO_MM : d * 0.5 }
+    return withRot({
+      kind: 'donut',
+      w: d,
+      h: d,
+      d,
+      inner: m[2] ? parseFloat(m[2]) * MIL_TO_MM : d * 0.5,
+    })
   }
   // rD （圆，直径）
   m = s.match(/^r([\d.]+)$/i)
   if (m) {
     const d = parseFloat(m[1]) * MIL_TO_MM
-    return { kind: 'round', w: d, h: d, d }
+    return withRot({ kind: 'round', w: d, h: d, d })
   }
   // 退化：尝试提取首个数字作为圆直径
   const num = s.match(/[\d.]+/)
   const d = num ? parseFloat(num[0]) * MIL_TO_MM : 1
-  return { kind: 'unknown', w: d, h: d, d }
+  return withRot({ kind: 'unknown', w: d, h: d, d })
 }
 
 // ---------- features 文件解析 ----------
@@ -852,6 +908,9 @@ function drawFeature(ctx: CanvasRenderingContext2D, f: OdbFeature, syms: Record<
     if (sym) {
       ctx.save()
       ctx.translate(f.x, f.y)
+      // 符号自带旋转（如 oval…_216）：绕符号中心旋转。
+      // 画布 y 轴向下，ODB++ 角度为逆时针（数学正向），故取负角。
+      if (sym.rot) ctx.rotate((-sym.rot * Math.PI) / 180)
       drawSymbolPath(ctx, sym, 0, 0)
       ctx.restore()
       if (sym.kind === 'donut') ctx.fill('evenodd')
@@ -872,6 +931,15 @@ function drawFeature(ctx: CanvasRenderingContext2D, f: OdbFeature, syms: Record<
     const r = Math.hypot(f.x1 - f.cx, f.y1! - f.cy!)
     if (r < 1e-6) {
       drawFeature(ctx, { kind: 'pad', symbol: f.symbol, polarity: f.polarity, x: f.x1, y: f.y1 }, syms, color)
+    } else if (
+      // 起点与终点重合 → 整圆（ODB++ 用「起终同点」表示 360° 圆），整圈描边
+      Math.abs(f.x1 - f.x2!) < 1e-9 &&
+      Math.abs(f.y1! - f.y2!) < 1e-9
+    ) {
+      ctx.lineWidth = w
+      ctx.beginPath()
+      ctx.arc(f.cx, f.cy!, r, 0, Math.PI * 2)
+      ctx.stroke()
     } else {
       const a1 = Math.atan2(f.y1! - f.cy!, f.x1 - f.cx!)
       const a2 = Math.atan2(f.y2! - f.cy!, f.x2! - f.cx!)

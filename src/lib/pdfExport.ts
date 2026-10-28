@@ -84,6 +84,10 @@ function concat(...arrs: Uint8Array[]): Bytes {
 // ---------- 绘图上下文（板坐标 mm → PDF pt 的仿射变换 + 运算符缓冲） ----------
 class Gfx {
   ops: string[]
+  /** 局部旋转：绕板坐标系中的 (cx, cy) 旋转 deg 度（逆时针为正） */
+  private rotDeg = 0
+  private rotCx = 0
+  private rotCy = 0
   // PDF_x = ax + x*sx，PDF_y = ay + y*sy
   // 横向与纵向缩放分开存储，以支持“固定画幅 + 内缩”布局下的非等比缩放。
   constructor(
@@ -95,13 +99,42 @@ class Gfx {
   ) {
     this.ops = ops ?? []
   }
+
+  /**
+   * 设置局部旋转中心与角度（板坐标，逆时针为正）。
+   * 旋转发生在板坐标系中、映射到 PDF 之前，因此不受 sx/sy 非等比缩放影响。
+   */
+  setLocalRotation(cx: number, cy: number, deg: number) {
+    this.rotCx = cx
+    this.rotCy = cy
+    this.rotDeg = deg || 0
+  }
+
+  /** 清除局部旋转 */
+  clearLocalRotation() {
+    this.rotDeg = 0
+  }
+
+  /** 板坐标点 → 施加局部旋转后的板坐标 */
+  private applyRot(x: number, y: number): [number, number] {
+    if (!this.rotDeg) return [x, y]
+    const a = (this.rotDeg * Math.PI) / 180
+    const ca = Math.cos(a)
+    const sa = Math.sin(a)
+    const dx = x - this.rotCx
+    const dy = y - this.rotCy
+    return [this.rotCx + dx * ca - dy * sa, this.rotCy + dx * sa + dy * ca]
+  }
+
   /** 板坐标点 → "x y" */
   P(x: number, y: number): string {
-    return `${fmt(this.ax + x * this.sx)} ${fmt(this.ay + y * this.sy)}`
+    const [px, py] = this.applyRot(x, y)
+    return `${fmt(this.ax + px * this.sx)} ${fmt(this.ay + py * this.sy)}`
   }
   /** 板坐标点 → PDF 坐标数值 [px, py] */
   pt(x: number, y: number): [number, number] {
-    return [this.ax + x * this.sx, this.ay + y * this.sy]
+    const [px, py] = this.applyRot(x, y)
+    return [this.ax + px * this.sx, this.ay + py * this.sy]
   }
   /** 板坐标长度(mm) → pt 数值（横向口径，用于线宽等标量） */
   W(mm: number): string {
@@ -245,7 +278,11 @@ function emitSymbolPath(g: Gfx, sym: OdbSymbol, x: number, y: number) {
 
 /** 焊盘符号 → 填充路径（donut 用 evenodd `f*`，其余 `f`） */
 function emitSymbol(g: Gfx, sym: OdbSymbol, x: number, y: number) {
+  // 符号自带旋转（如 oval…_216）时，绕符号中心在板坐标系内旋转
+  const rot = sym.rot ?? 0
+  if (rot) g.setLocalRotation(x, y, rot)
   emitSymbolPath(g, sym, x, y)
+  if (rot) g.clearLocalRotation()
   g.ops.push(sym.kind === 'donut' ? 'f*' : 'f')
 }
 
@@ -272,10 +309,18 @@ function emitFeature(g: Gfx, f: OdbFeature, syms: Record<number, OdbSymbol>) {
     const w = sym?.d ?? Math.min(sym?.w ?? 1, sym?.h ?? 1)
     const r = Math.hypot(f.x1 - f.cx, f.y1! - f.cy!)
     if (r < 1e-6) {
-      // 退化圆弧：按圆盘绘制
+      // 退化圆弧（半径为 0）：按圆盘绘制
       const rd = w / 2
       emitEllipse(g, f.x1, f.y1!, rd, rd)
       g.ops.push('f')
+    } else if (
+      // 起点与终点重合 → ODB++ 用「起终同点」表示整圆，需整圈描边。
+      // 若按普通弧处理会得到 0° 扫角，什么都画不出来（曾导致 817 个孔环缺失）。
+      Math.abs(f.x1 - f.x2!) < 1e-9 &&
+      Math.abs(f.y1! - f.y2!) < 1e-9
+    ) {
+      emitEllipse(g, f.cx, f.cy!, r, r)
+      g.ops.push(`${g.W(w)} w`, '1 J', 'S')
     } else {
       const a1 = Math.atan2(f.y1! - f.cy!, f.x1 - f.cx!)
       const a2 = Math.atan2(f.y2! - f.cy!, f.x2! - f.cx!)
