@@ -452,10 +452,11 @@ function emitLayer(g: Gfx, layer: OdbLayer, color: string, opts: EmitOpts = {}) 
     // ① 图框 / 标题栏：正向
     for (const f of outside) emitFeature(g, f, layer.symbols)
 
-    // ② 板面图形：裁剪到板框内 + 绕板框竖直中线镜像
+    // ② 板面图形：绕板框竖直中线镜像
+    //
+    // 这里不对镜像区做裁剪：图元已按归属精确分开（区域外的图框不会进入本分支），
+    // 再加裁剪反而会把落在板框边缘上的图形削掉半个线宽，导致边框处出现缺口。
     g.ops.push('q')
-    emitRectPath(g, region.minX, region.minY, region.w, region.h)
-    g.ops.push('W', 'n')
     const [cxPdf] = g.pt(region.minX + region.w / 2, region.minY)
     g.ops.push(`-1 0 0 1 ${fmt(2 * cxPdf)} 0 cm`)
     for (const f of inside) emitFeature(g, f, layer.symbols)
